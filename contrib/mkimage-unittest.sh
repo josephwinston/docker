@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Generate a very minimal filesystem based on busybox-static,
 # and load it into the local docker under the name "docker-ut".
 
@@ -15,7 +15,7 @@ SOCAT=$(which socat)
 
 shopt -s extglob
 set -ex
-ROOTFS=`mktemp -d /tmp/rootfs-busybox.XXXXXXXXXX`
+ROOTFS=`mktemp -d ${TMPDIR:-/var/tmp}/rootfs-busybox.XXXXXXXXXX`
 trap "rm -rf $ROOTFS" INT QUIT TERM
 cd $ROOTFS
 

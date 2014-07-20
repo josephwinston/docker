@@ -1,20 +1,41 @@
-from ubuntu:12.04
-maintainer Nick Stinemates
 #
-#    docker build -t docker:docs . && docker run -p 8000:8000 docker:docs
+# See the top level Makefile in https://github.com/dotcloud/docker for usage.
 #
+FROM 		debian:jessie
+MAINTAINER	Sven Dowideit <SvenDowideit@docker.com> (@SvenDowideit)
 
-run apt-get update
-run apt-get install -y python-setuptools make
-run easy_install pip
-#from docs/requirements.txt, but here to increase cacheability
-run pip install Sphinx==1.1.3
-run pip install sphinxcontrib-httpdomain==1.1.8
-add . /docs
-run cd /docs; make docs
+RUN 	apt-get update && apt-get install -yq make python-pip python-setuptools vim-tiny git gettext
 
-expose 8000
+RUN	pip install mkdocs
 
-workdir /docs/_build/html
+# add MarkdownTools to get transclusion
+# (future development)
+#RUN	easy_install -U setuptools
+#RUN	pip install MarkdownTools2
 
-entrypoint ["python", "-m", "SimpleHTTPServer"]
+# this version works, the current versions fail in different ways
+RUN	pip install awscli==1.3.9
+
+# get my sitemap.xml branch of mkdocs and use that for now
+RUN	git clone https://github.com/SvenDowideit/mkdocs	&&\
+	cd mkdocs/						&&\
+	git checkout docker-markdown-merge			&&\
+	./setup.py install
+
+ADD 	. /docs
+ADD	MAINTAINERS /docs/sources/humans.txt
+WORKDIR	/docs
+
+RUN	VERSION=$(cat /docs/VERSION)								&&\
+	GIT_BRANCH=$(cat /docs/GIT_BRANCH)							&&\
+	GITCOMMIT=$(cat /docs/GITCOMMIT)							&&\
+	AWS_S3_BUCKET=$(cat /docs/AWS_S3_BUCKET)						&&\
+	sed -i "s/\$VERSION/$VERSION/g" /docs/theme/mkdocs/base.html				&&\
+	sed -i "s/\$GITCOMMIT/$GITCOMMIT/g" /docs/theme/mkdocs/base.html			&&\
+	sed -i "s/\$GIT_BRANCH/$GIT_BRANCH/g" /docs/theme/mkdocs/base.html			&&\
+	sed -i "s/\$AWS_S3_BUCKET/$AWS_S3_BUCKET/g" /docs/theme/mkdocs/base.html
+
+# note, EXPOSE is only last because of https://github.com/dotcloud/docker/issues/3525
+EXPOSE	8000
+
+CMD 	["mkdocs", "serve"]

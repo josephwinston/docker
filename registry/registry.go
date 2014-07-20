@@ -2,55 +2,219 @@ package registry
 
 import (
 	"bytes"
+	"crypto/sha256"
+	_ "crypto/sha512"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/dotcloud/docker/auth"
-	"github.com/dotcloud/docker/utils"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dotcloud/docker/dockerversion"
+	"github.com/dotcloud/docker/utils"
 )
 
 var (
 	ErrAlreadyExists         = errors.New("Image already exists")
 	ErrInvalidRepositoryName = errors.New("Invalid repository name (ex: \"registry.domain.tld/myrepos\")")
-	ErrLoginRequired         = errors.New("Authentication is required.")
+	errLoginRequired         = errors.New("Authentication is required.")
 )
 
-func pingRegistryEndpoint(endpoint string) error {
-	if endpoint == auth.IndexServerAddress() {
+type TimeoutType uint32
+
+const (
+	NoTimeout TimeoutType = iota
+	ReceiveTimeout
+	ConnectTimeout
+)
+
+func newClient(jar http.CookieJar, roots *x509.CertPool, cert *tls.Certificate, timeout TimeoutType) *http.Client {
+	tlsConfig := tls.Config{RootCAs: roots}
+
+	if cert != nil {
+		tlsConfig.Certificates = append(tlsConfig.Certificates, *cert)
+	}
+
+	httpTransport := &http.Transport{
+		DisableKeepAlives: true,
+		Proxy:             http.ProxyFromEnvironment,
+		TLSClientConfig:   &tlsConfig,
+	}
+
+	switch timeout {
+	case ConnectTimeout:
+		httpTransport.Dial = func(proto string, addr string) (net.Conn, error) {
+			// Set the connect timeout to 5 seconds
+			conn, err := net.DialTimeout(proto, addr, 5*time.Second)
+			if err != nil {
+				return nil, err
+			}
+			// Set the recv timeout to 10 seconds
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
+			return conn, nil
+		}
+	case ReceiveTimeout:
+		httpTransport.Dial = func(proto string, addr string) (net.Conn, error) {
+			conn, err := net.Dial(proto, addr)
+			if err != nil {
+				return nil, err
+			}
+			conn = utils.NewTimeoutConn(conn, 1*time.Minute)
+			return conn, nil
+		}
+	}
+
+	return &http.Client{
+		Transport:     httpTransport,
+		CheckRedirect: AddRequiredHeadersToRedirectedRequests,
+		Jar:           jar,
+	}
+}
+
+func doRequest(req *http.Request, jar http.CookieJar, timeout TimeoutType) (*http.Response, *http.Client, error) {
+	hasFile := func(files []os.FileInfo, name string) bool {
+		for _, f := range files {
+			if f.Name() == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	hostDir := path.Join("/etc/docker/certs.d", req.URL.Host)
+	fs, err := ioutil.ReadDir(hostDir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, nil, err
+	}
+
+	var (
+		pool  *x509.CertPool
+		certs []*tls.Certificate
+	)
+
+	for _, f := range fs {
+		if strings.HasSuffix(f.Name(), ".crt") {
+			if pool == nil {
+				pool = x509.NewCertPool()
+			}
+			data, err := ioutil.ReadFile(path.Join(hostDir, f.Name()))
+			if err != nil {
+				return nil, nil, err
+			} else {
+				pool.AppendCertsFromPEM(data)
+			}
+		}
+		if strings.HasSuffix(f.Name(), ".cert") {
+			certName := f.Name()
+			keyName := certName[:len(certName)-5] + ".key"
+			if !hasFile(fs, keyName) {
+				return nil, nil, fmt.Errorf("Missing key %s for certificate %s", keyName, certName)
+			} else {
+				cert, err := tls.LoadX509KeyPair(path.Join(hostDir, certName), path.Join(hostDir, keyName))
+				if err != nil {
+					return nil, nil, err
+				}
+				certs = append(certs, &cert)
+			}
+		}
+		if strings.HasSuffix(f.Name(), ".key") {
+			keyName := f.Name()
+			certName := keyName[:len(keyName)-4] + ".cert"
+			if !hasFile(fs, certName) {
+				return nil, nil, fmt.Errorf("Missing certificate %s for key %s", certName, keyName)
+			}
+		}
+	}
+
+	if len(certs) == 0 {
+		client := newClient(jar, pool, nil, timeout)
+		res, err := client.Do(req)
+		if err != nil {
+			return nil, nil, err
+		}
+		return res, client, nil
+	} else {
+		for i, cert := range certs {
+			client := newClient(jar, pool, cert, timeout)
+			res, err := client.Do(req)
+			if i == len(certs)-1 {
+				// If this is the last cert, always return the result
+				return res, client, err
+			} else {
+				// Otherwise, continue to next cert if 403 or 5xx
+				if err == nil && res.StatusCode != 403 && !(res.StatusCode >= 500 && res.StatusCode < 600) {
+					return res, client, err
+				}
+			}
+		}
+	}
+
+	return nil, nil, nil
+}
+
+func pingRegistryEndpoint(endpoint string) (RegistryInfo, error) {
+	if endpoint == IndexServerAddress() {
 		// Skip the check, we now this one is valid
 		// (and we never want to fallback to http in case of error)
-		return nil
+		return RegistryInfo{Standalone: false}, nil
 	}
-	httpDial := func(proto string, addr string) (net.Conn, error) {
-		// Set the connect timeout to 5 seconds
-		conn, err := net.DialTimeout(proto, addr, time.Duration(5)*time.Second)
-		if err != nil {
-			return nil, err
-		}
-		// Set the recv timeout to 10 seconds
-		conn.SetDeadline(time.Now().Add(time.Duration(10) * time.Second))
-		return conn, nil
-	}
-	httpTransport := &http.Transport{Dial: httpDial}
-	client := &http.Client{Transport: httpTransport}
-	resp, err := client.Get(endpoint + "_ping")
+
+	req, err := http.NewRequest("GET", endpoint+"_ping", nil)
 	if err != nil {
-		return err
+		return RegistryInfo{Standalone: false}, err
 	}
-	if resp.Header.Get("X-Docker-Registry-Version") == "" {
-		return errors.New("This does not look like a Registry server (\"X-Docker-Registry-Version\" header not found in the response)")
+
+	resp, _, err := doRequest(req, nil, ConnectTimeout)
+	if err != nil {
+		return RegistryInfo{Standalone: false}, err
 	}
-	return nil
+
+	defer resp.Body.Close()
+
+	jsonString, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return RegistryInfo{Standalone: false}, fmt.Errorf("Error while reading the http response: %s", err)
+	}
+
+	// If the header is absent, we assume true for compatibility with earlier
+	// versions of the registry. default to true
+	info := RegistryInfo{
+		Standalone: true,
+	}
+	if err := json.Unmarshal(jsonString, &info); err != nil {
+		utils.Debugf("Error unmarshalling the _ping RegistryInfo: %s", err)
+		// don't stop here. Just assume sane defaults
+	}
+	if hdr := resp.Header.Get("X-Docker-Registry-Version"); hdr != "" {
+		utils.Debugf("Registry version header: '%s'", hdr)
+		info.Version = hdr
+	}
+	utils.Debugf("RegistryInfo.Version: %q", info.Version)
+
+	standalone := resp.Header.Get("X-Docker-Registry-Standalone")
+	utils.Debugf("Registry standalone header: '%s'", standalone)
+	// Accepted values are "true" (case-insensitive) and "1".
+	if strings.EqualFold(standalone, "true") || standalone == "1" {
+		info.Standalone = true
+	} else if len(standalone) > 0 {
+		// there is a header set, and it is not "true" or "1", so assume fails
+		info.Standalone = false
+	}
+	utils.Debugf("RegistryInfo.Standalone: %q", info.Standalone)
+	return info, nil
 }
 
 func validateRepositoryName(repositoryName string) error {
@@ -77,23 +241,18 @@ func validateRepositoryName(repositoryName string) error {
 	return nil
 }
 
-// Resolves a repository name to a endpoint + name
+// Resolves a repository name to a hostname + name
 func ResolveRepositoryName(reposName string) (string, string, error) {
 	if strings.Contains(reposName, "://") {
 		// It cannot contain a scheme!
 		return "", "", ErrInvalidRepositoryName
 	}
 	nameParts := strings.SplitN(reposName, "/", 2)
-	if !strings.Contains(nameParts[0], ".") && !strings.Contains(nameParts[0], ":") &&
-		nameParts[0] != "localhost" {
+	if len(nameParts) == 1 || (!strings.Contains(nameParts[0], ".") && !strings.Contains(nameParts[0], ":") &&
+		nameParts[0] != "localhost") {
 		// This is a Docker Index repos (ex: samalba/hipache or ubuntu)
 		err := validateRepositoryName(reposName)
-		return auth.IndexServerAddress(), reposName, err
-	}
-	if len(nameParts) < 2 {
-		// There is a dot in repos name (and no registry address)
-		// Is it a Registry address without repos name?
-		return "", "", ErrInvalidRepositoryName
+		return IndexServerAddress(), reposName, err
 	}
 	hostname := nameParts[0]
 	reposName = nameParts[1]
@@ -103,11 +262,8 @@ func ResolveRepositoryName(reposName string) (string, string, error) {
 	if err := validateRepositoryName(reposName); err != nil {
 		return "", "", err
 	}
-	endpoint, err := ExpandAndVerifyRegistryUrl(hostname)
-	if err != nil {
-		return "", "", err
-	}
-	return endpoint, reposName, err
+
+	return hostname, reposName, nil
 }
 
 // this method expands the registry name as used in the prefix of a repo
@@ -120,16 +276,16 @@ func ExpandAndVerifyRegistryUrl(hostname string) (string, error) {
 			// there is no path given. Expand with default path
 			hostname = hostname + "/v1/"
 		}
-		if err := pingRegistryEndpoint(hostname); err != nil {
+		if _, err := pingRegistryEndpoint(hostname); err != nil {
 			return "", errors.New("Invalid Registry endpoint: " + err.Error())
 		}
 		return hostname, nil
 	}
 	endpoint := fmt.Sprintf("https://%s/v1/", hostname)
-	if err := pingRegistryEndpoint(endpoint); err != nil {
+	if _, err := pingRegistryEndpoint(endpoint); err != nil {
 		utils.Debugf("Registry %s does not work (%s), falling back to http", endpoint, err)
 		endpoint = fmt.Sprintf("http://%s/v1/", hostname)
-		if err = pingRegistryEndpoint(endpoint); err != nil {
+		if _, err = pingRegistryEndpoint(endpoint); err != nil {
 			//TODO: triggering highland build can be done there without "failing"
 			return "", errors.New("Invalid Registry endpoint: " + err.Error())
 		}
@@ -137,18 +293,14 @@ func ExpandAndVerifyRegistryUrl(hostname string) (string, error) {
 	return endpoint, nil
 }
 
-func doWithCookies(c *http.Client, req *http.Request) (*http.Response, error) {
-	for _, cookie := range c.Jar.Cookies(req.URL) {
-		req.AddCookie(cookie)
+func setTokenAuth(req *http.Request, token []string) {
+	if req.Header.Get("Authorization") == "" { // Don't override
+		req.Header.Set("Authorization", "Token "+strings.Join(token, ","))
 	}
-	res, err := c.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if len(res.Cookies()) > 0 {
-		c.Jar.SetCookies(req.URL, res.Cookies())
-	}
-	return res, err
+}
+
+func (r *Registry) doRequest(req *http.Request) (*http.Response, *http.Client, error) {
+	return doRequest(req, r.jar, r.timeout)
 }
 
 // Retrieve the history of a given image from the Registry.
@@ -158,15 +310,15 @@ func (r *Registry) GetRemoteHistory(imgID, registry string, token []string) ([]s
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ", "))
-	res, err := doWithCookies(r.client, req)
+	setTokenAuth(req, token)
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
 		if res.StatusCode == 401 {
-			return nil, ErrLoginRequired
+			return nil, errLoginRequired
 		}
 		return nil, utils.NewHTTPRequestError(fmt.Sprintf("Server error: %d trying to fetch remote history for %s", res.StatusCode, imgID), res)
 	}
@@ -185,15 +337,18 @@ func (r *Registry) GetRemoteHistory(imgID, registry string, token []string) ([]s
 }
 
 // Check if an image exists in the Registry
+// TODO: This method should return the errors instead of masking them and returning false
 func (r *Registry) LookupRemoteImage(imgID, registry string, token []string) bool {
 
 	req, err := r.reqFactory.NewRequest("GET", registry+"images/"+imgID+"/json", nil)
 	if err != nil {
+		utils.Errorf("Error in LookupRemoteImage %s", err)
 		return false
 	}
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ", "))
-	res, err := doWithCookies(r.client, req)
+	setTokenAuth(req, token)
+	res, _, err := r.doRequest(req)
 	if err != nil {
+		utils.Errorf("Error in LookupRemoteImage %s", err)
 		return false
 	}
 	res.Body.Close()
@@ -207,8 +362,8 @@ func (r *Registry) GetRemoteImageJSON(imgID, registry string, token []string) ([
 	if err != nil {
 		return nil, -1, fmt.Errorf("Failed to download json: %s", err)
 	}
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ", "))
-	res, err := doWithCookies(r.client, req)
+	setTokenAuth(req, token)
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return nil, -1, fmt.Errorf("Failed to download json: %s", err)
 	}
@@ -217,9 +372,13 @@ func (r *Registry) GetRemoteImageJSON(imgID, registry string, token []string) ([
 		return nil, -1, utils.NewHTTPRequestError(fmt.Sprintf("HTTP code %d", res.StatusCode), res)
 	}
 
-	imageSize, err := strconv.Atoi(res.Header.Get("X-Docker-Size"))
-	if err != nil {
-		return nil, -1, err
+	// if the size header is not present, then set it to '-1'
+	imageSize := -1
+	if hdr := res.Header.Get("X-Docker-Size"); hdr != "" {
+		imageSize, err = strconv.Atoi(hdr)
+		if err != nil {
+			return nil, -1, err
+		}
 	}
 
 	jsonString, err := ioutil.ReadAll(res.Body)
@@ -229,13 +388,46 @@ func (r *Registry) GetRemoteImageJSON(imgID, registry string, token []string) ([
 	return jsonString, imageSize, nil
 }
 
-func (r *Registry) GetRemoteImageLayer(imgID, registry string, token []string) (io.ReadCloser, error) {
-	req, err := r.reqFactory.NewRequest("GET", registry+"images/"+imgID+"/layer", nil)
+func (r *Registry) GetRemoteImageLayer(imgID, registry string, token []string, imgSize int64) (io.ReadCloser, error) {
+	var (
+		retries   = 5
+		headRes   *http.Response
+		client    *http.Client
+		hasResume bool = false
+		imageURL       = fmt.Sprintf("%simages/%s/layer", registry, imgID)
+	)
+	headReq, err := r.reqFactory.NewRequest("HEAD", imageURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting from the server: %s\n", err)
 	}
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ", "))
-	res, err := doWithCookies(r.client, req)
+
+	setTokenAuth(headReq, token)
+	for i := 1; i <= retries; i++ {
+		headRes, client, err = r.doRequest(headReq)
+		if err != nil && i == retries {
+			return nil, fmt.Errorf("Eror while making head request: %s\n", err)
+		} else if err != nil {
+			time.Sleep(time.Duration(i) * 5 * time.Second)
+			continue
+		}
+		break
+	}
+
+	if headRes.Header.Get("Accept-Ranges") == "bytes" && imgSize > 0 {
+		hasResume = true
+	}
+
+	req, err := r.reqFactory.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("Error while getting from the server: %s\n", err)
+	}
+	setTokenAuth(req, token)
+	if hasResume {
+		utils.Debugf("server supports resume")
+		return utils.ResumableRequestReader(client, req, 5, imgSize), nil
+	}
+	utils.Debugf("server doesn't support resume")
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -260,8 +452,8 @@ func (r *Registry) GetRemoteTags(registries []string, repository string, token [
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Token "+strings.Join(token, ", "))
-		res, err := doWithCookies(r.client, req)
+		setTokenAuth(req, token)
+		res, _, err := r.doRequest(req)
 		if err != nil {
 			return nil, err
 		}
@@ -288,7 +480,27 @@ func (r *Registry) GetRemoteTags(registries []string, repository string, token [
 	return nil, fmt.Errorf("Could not reach any registry endpoint")
 }
 
-func (r *Registry) GetRepositoryData(indexEp, remote string) (*RepositoryData, error) {
+func buildEndpointsList(headers []string, indexEp string) ([]string, error) {
+	var endpoints []string
+	parsedUrl, err := url.Parse(indexEp)
+	if err != nil {
+		return nil, err
+	}
+	var urlScheme = parsedUrl.Scheme
+	// The Registry's URL scheme has to match the Index'
+	for _, ep := range headers {
+		epList := strings.Split(ep, ",")
+		for _, epListElement := range epList {
+			endpoints = append(
+				endpoints,
+				fmt.Sprintf("%s://%s/v1/", urlScheme, strings.TrimSpace(epListElement)))
+		}
+	}
+	return endpoints, nil
+}
+
+func (r *Registry) GetRepositoryData(remote string) (*RepositoryData, error) {
+	indexEp := r.indexEndpoint
 	repositoryTarget := fmt.Sprintf("%srepositories/%s/images", indexEp, remote)
 
 	utils.Debugf("[registry] Calling GET %s", repositoryTarget)
@@ -302,13 +514,13 @@ func (r *Registry) GetRepositoryData(indexEp, remote string) (*RepositoryData, e
 	}
 	req.Header.Set("X-Docker-Token", "true")
 
-	res, err := r.client.Do(req)
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode == 401 {
-		return nil, ErrLoginRequired
+		return nil, errLoginRequired
 	}
 	// TODO: Right now we're ignoring checksums in the response body.
 	// In the future, we need to use them to check image validity.
@@ -322,14 +534,18 @@ func (r *Registry) GetRepositoryData(indexEp, remote string) (*RepositoryData, e
 	}
 
 	var endpoints []string
-	var urlScheme = indexEp[:strings.Index(indexEp, ":")]
 	if res.Header.Get("X-Docker-Endpoints") != "" {
-		// The Registry's URL scheme has to match the Index'
-		for _, ep := range res.Header["X-Docker-Endpoints"] {
-			endpoints = append(endpoints, fmt.Sprintf("%s://%s/v1/", urlScheme, ep))
+		endpoints, err = buildEndpointsList(res.Header["X-Docker-Endpoints"], indexEp)
+		if err != nil {
+			return nil, err
 		}
 	} else {
-		return nil, fmt.Errorf("Index response didn't contain any endpoints")
+		// Assume the endpoint is on the same host
+		u, err := url.Parse(indexEp)
+		if err != nil {
+			return nil, err
+		}
+		endpoints = append(endpoints, fmt.Sprintf("%s://%s/v1/", u.Scheme, req.URL.Host))
 	}
 
 	checksumsJSON, err := ioutil.ReadAll(res.Body)
@@ -362,16 +578,17 @@ func (r *Registry) PushImageChecksumRegistry(imgData *ImgData, registry string, 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ","))
+	setTokenAuth(req, token)
 	req.Header.Set("X-Docker-Checksum", imgData.Checksum)
+	req.Header.Set("X-Docker-Checksum-Payload", imgData.ChecksumPayload)
 
-	res, err := doWithCookies(r.client, req)
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return fmt.Errorf("Failed to upload metadata: %s", err)
 	}
 	defer res.Body.Close()
 	if len(res.Cookies()) > 0 {
-		r.client.Jar.SetCookies(req.URL, res.Cookies())
+		r.jar.SetCookies(req.URL, res.Cookies())
 	}
 	if res.StatusCode != 200 {
 		errBody, err := ioutil.ReadAll(res.Body)
@@ -399,13 +616,16 @@ func (r *Registry) PushImageJSONRegistry(imgData *ImgData, jsonRaw []byte, regis
 		return err
 	}
 	req.Header.Add("Content-type", "application/json")
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ","))
+	setTokenAuth(req, token)
 
-	res, err := doWithCookies(r.client, req)
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return fmt.Errorf("Failed to upload metadata: %s", err)
 	}
 	defer res.Body.Close()
+	if res.StatusCode == 401 && strings.HasPrefix(registry, "http://") {
+		return utils.NewHTTPRequestError("HTTP code 401, Docker will not send auth headers over HTTP.", res)
+	}
 	if res.StatusCode != 200 {
 		errBody, err := ioutil.ReadAll(res.Body)
 		if err != nil {
@@ -422,33 +642,44 @@ func (r *Registry) PushImageJSONRegistry(imgData *ImgData, jsonRaw []byte, regis
 	return nil
 }
 
-func (r *Registry) PushImageLayerRegistry(imgID string, layer io.Reader, registry string, token []string, jsonRaw []byte) (checksum string, err error) {
+func (r *Registry) PushImageLayerRegistry(imgID string, layer io.Reader, registry string, token []string, jsonRaw []byte) (checksum string, checksumPayload string, err error) {
 
 	utils.Debugf("[registry] Calling PUT %s", registry+"images/"+imgID+"/layer")
 
 	tarsumLayer := &utils.TarSum{Reader: layer}
+	h := sha256.New()
+	h.Write(jsonRaw)
+	h.Write([]byte{'\n'})
+	checksumLayer := &utils.CheckSum{Reader: tarsumLayer, Hash: h}
 
-	req, err := r.reqFactory.NewRequest("PUT", registry+"images/"+imgID+"/layer", tarsumLayer)
+	req, err := r.reqFactory.NewRequest("PUT", registry+"images/"+imgID+"/layer", checksumLayer)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.ContentLength = -1
 	req.TransferEncoding = []string{"chunked"}
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ","))
-	res, err := doWithCookies(r.client, req)
+	setTokenAuth(req, token)
+	res, _, err := r.doRequest(req)
 	if err != nil {
-		return "", fmt.Errorf("Failed to upload layer: %s", err)
+		return "", "", fmt.Errorf("Failed to upload layer: %s", err)
+	}
+	if rc, ok := layer.(io.Closer); ok {
+		if err := rc.Close(); err != nil {
+			return "", "", err
+		}
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
 		errBody, err := ioutil.ReadAll(res.Body)
 		if err != nil {
-			return "", utils.NewHTTPRequestError(fmt.Sprintf("HTTP code %d while uploading metadata and error when trying to parse response body: %s", res.StatusCode, err), res)
+			return "", "", utils.NewHTTPRequestError(fmt.Sprintf("HTTP code %d while uploading metadata and error when trying to parse response body: %s", res.StatusCode, err), res)
 		}
-		return "", utils.NewHTTPRequestError(fmt.Sprintf("Received HTTP code %d while uploading layer: %s", res.StatusCode, errBody), res)
+		return "", "", utils.NewHTTPRequestError(fmt.Sprintf("Received HTTP code %d while uploading layer: %s", res.StatusCode, errBody), res)
 	}
-	return tarsumLayer.Sum(jsonRaw), nil
+
+	checksumPayload = "sha256:" + checksumLayer.Sum()
+	return tarsumLayer.Sum(jsonRaw), checksumPayload, nil
 }
 
 // push a tag on the registry.
@@ -463,9 +694,9 @@ func (r *Registry) PushRegistryTag(remote, revision, tag, registry string, token
 		return err
 	}
 	req.Header.Add("Content-type", "application/json")
-	req.Header.Set("Authorization", "Token "+strings.Join(token, ","))
+	setTokenAuth(req, token)
 	req.ContentLength = int64(len(revision))
-	res, err := doWithCookies(r.client, req)
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return err
 	}
@@ -476,8 +707,9 @@ func (r *Registry) PushRegistryTag(remote, revision, tag, registry string, token
 	return nil
 }
 
-func (r *Registry) PushImageJSONIndex(indexEp, remote string, imgList []*ImgData, validate bool, regs []string) (*RepositoryData, error) {
+func (r *Registry) PushImageJSONIndex(remote string, imgList []*ImgData, validate bool, regs []string) (*RepositoryData, error) {
 	cleanImgList := []*ImgData{}
+	indexEp := r.indexEndpoint
 
 	if validate {
 		for _, elem := range imgList {
@@ -512,7 +744,7 @@ func (r *Registry) PushImageJSONIndex(indexEp, remote string, imgList []*ImgData
 		req.Header["X-Docker-Endpoints"] = regs
 	}
 
-	res, err := r.client.Do(req)
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +763,7 @@ func (r *Registry) PushImageJSONIndex(indexEp, remote string, imgList []*ImgData
 		if validate {
 			req.Header["X-Docker-Endpoints"] = regs
 		}
-		res, err = r.client.Do(req)
+		res, _, err := r.doRequest(req)
 		if err != nil {
 			return nil, err
 		}
@@ -539,7 +771,6 @@ func (r *Registry) PushImageJSONIndex(indexEp, remote string, imgList []*ImgData
 	}
 
 	var tokens, endpoints []string
-	var urlScheme = indexEp[:strings.Index(indexEp, ":")]
 	if !validate {
 		if res.StatusCode != 200 && res.StatusCode != 201 {
 			errBody, err := ioutil.ReadAll(res.Body)
@@ -556,9 +787,9 @@ func (r *Registry) PushImageJSONIndex(indexEp, remote string, imgList []*ImgData
 		}
 
 		if res.Header.Get("X-Docker-Endpoints") != "" {
-			// The Registry's URL scheme has to match the Index'
-			for _, ep := range res.Header["X-Docker-Endpoints"] {
-				endpoints = append(endpoints, fmt.Sprintf("%s://%s/v1/", urlScheme, ep))
+			endpoints, err = buildEndpointsList(res.Header["X-Docker-Endpoints"], indexEp)
+			if err != nil {
+				return nil, err
 			}
 		} else {
 			return nil, fmt.Errorf("Index response didn't contain any endpoints")
@@ -581,12 +812,17 @@ func (r *Registry) PushImageJSONIndex(indexEp, remote string, imgList []*ImgData
 }
 
 func (r *Registry) SearchRepositories(term string) (*SearchResults, error) {
-	u := auth.IndexServerAddress() + "search?q=" + url.QueryEscape(term)
+	utils.Debugf("Index server: %s", r.indexEndpoint)
+	u := r.indexEndpoint + "search?q=" + url.QueryEscape(term)
 	req, err := r.reqFactory.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.client.Do(req)
+	if r.authConfig != nil && len(r.authConfig.Username) > 0 {
+		req.SetBasicAuth(r.authConfig.Username, r.authConfig.Password)
+	}
+	req.Header.Set("X-Docker-Token", "true")
+	res, _, err := r.doRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -603,12 +839,12 @@ func (r *Registry) SearchRepositories(term string) (*SearchResults, error) {
 	return result, err
 }
 
-func (r *Registry) GetAuthConfig(withPasswd bool) *auth.AuthConfig {
+func (r *Registry) GetAuthConfig(withPasswd bool) *AuthConfig {
 	password := ""
 	if withPasswd {
 		password = r.authConfig.Password
 	}
-	return &auth.AuthConfig{
+	return &AuthConfig{
 		Username: r.authConfig.Username,
 		Password: password,
 		Email:    r.authConfig.Email,
@@ -636,34 +872,125 @@ type RepositoryData struct {
 }
 
 type ImgData struct {
-	ID       string `json:"id"`
-	Checksum string `json:"checksum,omitempty"`
-	Tag      string `json:",omitempty"`
+	ID              string `json:"id"`
+	Checksum        string `json:"checksum,omitempty"`
+	ChecksumPayload string `json:"-"`
+	Tag             string `json:",omitempty"`
+}
+
+type RegistryInfo struct {
+	Version    string `json:"version"`
+	Standalone bool   `json:"standalone"`
 }
 
 type Registry struct {
-	client     *http.Client
-	authConfig *auth.AuthConfig
-	reqFactory *utils.HTTPRequestFactory
+	authConfig    *AuthConfig
+	reqFactory    *utils.HTTPRequestFactory
+	indexEndpoint string
+	jar           *cookiejar.Jar
+	timeout       TimeoutType
 }
 
-func NewRegistry(root string, authConfig *auth.AuthConfig, factory *utils.HTTPRequestFactory) (r *Registry, err error) {
-	httpTransport := &http.Transport{
-		DisableKeepAlives: true,
-		Proxy:             http.ProxyFromEnvironment,
+func trustedLocation(req *http.Request) bool {
+	var (
+		trusteds = []string{"docker.com", "docker.io"}
+		hostname = strings.SplitN(req.Host, ":", 2)[0]
+	)
+	if req.URL.Scheme != "https" {
+		return false
 	}
 
-	r = &Registry{
-		authConfig: authConfig,
-		client: &http.Client{
-			Transport: httpTransport,
-		},
+	for _, trusted := range trusteds {
+		if hostname == trusted || strings.HasSuffix(hostname, "."+trusted) {
+			return true
+		}
 	}
-	r.client.Jar, err = cookiejar.New(nil)
+	return false
+}
+
+func AddRequiredHeadersToRedirectedRequests(req *http.Request, via []*http.Request) error {
+	if via != nil && via[0] != nil {
+		if trustedLocation(req) && trustedLocation(via[0]) {
+			req.Header = via[0].Header
+		} else {
+			for k, v := range via[0].Header {
+				if k != "Authorization" {
+					for _, vv := range v {
+						req.Header.Add(k, vv)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func NewRegistry(authConfig *AuthConfig, factory *utils.HTTPRequestFactory, indexEndpoint string, timeout bool) (r *Registry, err error) {
+	r = &Registry{
+		authConfig:    authConfig,
+		indexEndpoint: indexEndpoint,
+	}
+
+	if timeout {
+		r.timeout = ReceiveTimeout
+	}
+
+	r.jar, err = cookiejar.New(nil)
 	if err != nil {
 		return nil, err
 	}
 
+	// If we're working with a standalone private registry over HTTPS, send Basic Auth headers
+	// alongside our requests.
+	if indexEndpoint != IndexServerAddress() && strings.HasPrefix(indexEndpoint, "https://") {
+		info, err := pingRegistryEndpoint(indexEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		if info.Standalone {
+			utils.Debugf("Endpoint %s is eligible for private registry registry. Enabling decorator.", indexEndpoint)
+			dec := utils.NewHTTPAuthDecorator(authConfig.Username, authConfig.Password)
+			factory.AddDecorator(dec)
+		}
+	}
+
 	r.reqFactory = factory
 	return r, nil
+}
+
+func HTTPRequestFactory(metaHeaders map[string][]string) *utils.HTTPRequestFactory {
+	// FIXME: this replicates the 'info' job.
+	httpVersion := make([]utils.VersionInfo, 0, 4)
+	httpVersion = append(httpVersion, &simpleVersionInfo{"docker", dockerversion.VERSION})
+	httpVersion = append(httpVersion, &simpleVersionInfo{"go", runtime.Version()})
+	httpVersion = append(httpVersion, &simpleVersionInfo{"git-commit", dockerversion.GITCOMMIT})
+	if kernelVersion, err := utils.GetKernelVersion(); err == nil {
+		httpVersion = append(httpVersion, &simpleVersionInfo{"kernel", kernelVersion.String()})
+	}
+	httpVersion = append(httpVersion, &simpleVersionInfo{"os", runtime.GOOS})
+	httpVersion = append(httpVersion, &simpleVersionInfo{"arch", runtime.GOARCH})
+	ud := utils.NewHTTPUserAgentDecorator(httpVersion...)
+	md := &utils.HTTPMetaHeadersDecorator{
+		Headers: metaHeaders,
+	}
+	factory := utils.NewHTTPRequestFactory(ud, md)
+	return factory
+}
+
+// simpleVersionInfo is a simple implementation of
+// the interface VersionInfo, which is used
+// to provide version information for some product,
+// component, etc. It stores the product name and the version
+// in string and returns them on calls to Name() and Version().
+type simpleVersionInfo struct {
+	name    string
+	version string
+}
+
+func (v *simpleVersionInfo) Name() string {
+	return v.name
+}
+
+func (v *simpleVersionInfo) Version() string {
+	return v.version
 }

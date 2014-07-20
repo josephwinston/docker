@@ -1,41 +1,66 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -e
+
+cd "$(dirname "$BASH_SOURCE")/.."
 
 # Downloads dependencies into vendor/ directory
-if [[ ! -d vendor ]]; then
-  mkdir vendor
-fi
-vendor_dir=${PWD}/vendor
+mkdir -p vendor
+cd vendor
 
-git_clone () {
-  PKG=$1
-  REV=$2
-  (
-    set -e
-    cd $vendor_dir
-    if [[ -d src/$PKG ]]; then
-      echo "src/$PKG already exists. Removing."
-      rm -fr src/$PKG
-    fi
-    cd $vendor_dir && git clone http://$PKG src/$PKG
-    cd src/$PKG && git checkout -f $REV && rm -fr .git
-  )
+clone() {
+	vcs=$1
+	pkg=$2
+	rev=$3
+	
+	pkg_url=https://$pkg
+	target_dir=src/$pkg
+	
+	echo -n "$pkg @ $rev: "
+	
+	if [ -d $target_dir ]; then
+		echo -n 'rm old, '
+		rm -fr $target_dir
+	fi
+	
+	echo -n 'clone, '
+	case $vcs in
+		git)
+			git clone --quiet --no-checkout $pkg_url $target_dir
+			( cd $target_dir && git reset --quiet --hard $rev )
+			;;
+		hg)
+			hg clone --quiet --updaterev $rev $pkg_url $target_dir
+			;;
+	esac
+	
+	echo -n 'rm VCS, '
+	( cd $target_dir && rm -rf .{git,hg} )
+	
+	echo done
 }
 
-git_clone github.com/kr/pty 3b1f6487b
+clone git github.com/kr/pty 67e2db24c8
 
-git_clone github.com/gorilla/context/ 708054d61e5
+clone git github.com/gorilla/context 14f550f51a
 
-git_clone github.com/gorilla/mux/ 9b36453141c
+clone git github.com/gorilla/mux 136d54f81f
 
-git_clone github.com/dotcloud/tar/ e5ea6bb21a
+clone git github.com/syndtr/gocapability 3c85049eae
 
-# Docker requires code.google.com/p/go.net/websocket
-PKG=code.google.com/p/go.net REV=84a4013f96e0
-(
-  set -e
-  cd $vendor_dir
-  if [[ ! -d src/$PKG ]]; then
-    hg clone https://$PKG src/$PKG
-  fi
-  cd src/$PKG && hg checkout -r $REV
-)
+clone git github.com/tchap/go-patricia v1.0.1
+
+clone hg code.google.com/p/go.net 84a4013f96e0
+
+clone hg code.google.com/p/gosqlite 74691fb6f837
+
+# get Go tip's archive/tar, for xattr support and improved performance
+# TODO after Go 1.4 drops, bump our minimum supported version and drop this vendored dep
+clone hg code.google.com/p/go 17404efd6b02
+mv src/code.google.com/p/go/src/pkg/archive/tar tmp-tar
+rm -rf src/code.google.com/p/go
+mkdir -p src/code.google.com/p/go/src/pkg/archive
+mv tmp-tar src/code.google.com/p/go/src/pkg/archive/tar
+
+clone git github.com/godbus/dbus v1
+clone git github.com/coreos/go-systemd v2
+clone git github.com/docker/libcontainer cf45d141db69ce11dcccac178e5607a385609e15

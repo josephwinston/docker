@@ -4,11 +4,25 @@ Want to hack on Docker? Awesome! Here are instructions to get you
 started. They are probably not perfect, please let us know if anything
 feels wrong or incomplete.
 
+## Reporting Issues
+
+When reporting [issues](https://github.com/dotcloud/docker/issues) on
+GitHub please include your host OS (Ubuntu 12.04, Fedora 19, etc).
+Please include:
+
+* The output of `uname -a`.
+* The output of `docker version`.
+* The output of `docker -D info`.
+
+Please also include the steps required to reproduce the problem if
+possible and applicable.  This information will help us review and fix
+your issue faster.
+
 ## Build Environment
 
 For instructions on setting up your development environment, please
 see our dedicated [dev environment setup
-docs](http://docs.docker.io/en/latest/contributing/devenvironment/).
+docs](http://docs.docker.com/contributing/devenvironment/).
 
 ## Contribution guidelines
 
@@ -25,7 +39,7 @@ received feedback on what to improve.
 We're trying very hard to keep Docker lean and focused. We don't want it
 to do everything for everybody. This means that we might decide against
 incorporating a new feature. However, there might be a way to implement
-that feature *on top of* docker.
+that feature *on top of* Docker.
 
 ### Discuss your design on the mailing list
 
@@ -38,7 +52,7 @@ else is working on the same thing.
 
 ### Create issues...
 
-Any significant improvement should be documented as [a github
+Any significant improvement should be documented as [a GitHub
 issue](https://github.com/dotcloud/docker/issues) before anybody
 starts working on it.
 
@@ -51,12 +65,12 @@ help prioritize the most common problems and requests.
 
 ### Conventions
 
-Fork the repo and make changes on your fork in a feature branch:
+Fork the repository and make changes on your fork in a feature branch:
 
-- If it's a bugfix branch, name it XXX-something where XXX is the number of the
-  issue
+- If it's a bug fix branch, name it XXXX-something where XXXX is the number of the
+  issue.
 - If it's a feature branch, create an enhancement issue to announce your
-  intentions, and name it XXX-something where XXX is the number of the issue.
+  intentions, and name it XXXX-something where XXXX is the number of the issue.
 
 Submit unit tests for your changes.  Go has a great test framework built in; use
 it! Take a look at existing tests for inspiration. Run the full test suite on
@@ -64,20 +78,21 @@ your branch before submitting a pull request.
 
 Update the documentation when creating or modifying features. Test
 your documentation changes for clarity, concision, and correctness, as
-well as a clean docmuent build. See ``docs/README.md`` for more
-information on building the docs and how docs get released.
+well as a clean documentation build. See `docs/README.md` for more
+information on building the docs and how they get released.
 
 Write clean code. Universally formatted code promotes ease of writing, reading,
-and maintenance. Always run `go fmt` before committing your changes. Most
-editors have plugins that do this automatically, and there's also a git
-pre-commit hook:
-
-```
-curl -o .git/hooks/pre-commit https://raw.github.com/edsrzf/gofmt-git-hook/master/fmt-check && chmod +x .git/hooks/pre-commit
-```
+and maintenance. Always run `gofmt -s -w file.go` on each changed file before
+committing your changes. Most editors have plug-ins that do this automatically.
 
 Pull requests descriptions should be as clear as possible and include a
 reference to all the issues that they address.
+
+Pull requests must not contain commits from other users or branches.
+
+Commit messages must start with a capitalized and short summary (max. 50
+chars) written in the imperative, followed by an optional, more detailed
+explanatory text which is separated from the summary by an empty line.
 
 Code review comments may be added to your pull request. Discuss, then make the
 suggested modifications and push additional commits to your feature branch. Be
@@ -90,32 +105,106 @@ logical units of work using `git rebase -i` and `git push -f`. After every
 commit the test suite should be passing. Include documentation changes in the
 same commit so that a revert would remove all traces of the feature or fix.
 
-Commits that fix or close an issue should include a reference like `Closes #XXX`
-or `Fixes #XXX`, which will automatically close the issue when merged.
+Commits that fix or close an issue should include a reference like
+`Closes #XXXX` or `Fixes #XXXX`, which will automatically close the
+issue when merged.
 
-Add your name to the AUTHORS file, but make sure the list is sorted and your
-name and email address match your git configuration. The AUTHORS file is
-regenerated occasionally from the git commit history, so a mismatch may result
-in your changes being overwritten.
+Please do not add yourself to the `AUTHORS` file, as it is regenerated
+regularly from the Git history.
 
-### Approval
+### Merge approval
 
-Docker maintainers use LGTM (looks good to me) in comments on the code review
+Docker maintainers use LGTM (Looks Good To Me) in comments on the code review
 to indicate acceptance.
 
 A change requires LGTMs from an absolute majority of the maintainers of each
-component affected. For example, if a change affects docs/ and registry/, it
-needs an absolute majority from the maintainers of docs/ AND, separately, an
-absolute majority of the maintainers of registry
+component affected. For example, if a change affects `docs/` and `registry/`, it
+needs an absolute majority from the maintainers of `docs/` AND, separately, an
+absolute majority of the maintainers of `registry/`.
 
 For more details see [MAINTAINERS.md](hack/MAINTAINERS.md)
 
+### Sign your work
+
+The sign-off is a simple line at the end of the explanation for the
+patch, which certifies that you wrote it or otherwise have the right to
+pass it on as an open-source patch.  The rules are pretty simple: if you
+can certify the below (from
+[developercertificate.org](http://developercertificate.org/)):
+
+```
+Developer Certificate of Origin
+Version 1.1
+
+Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+660 York Street, Suite 102,
+San Francisco, CA 94110 USA
+
+Everyone is permitted to copy and distribute verbatim copies of this
+license document, but changing it is not allowed.
+
+Developer's Certificate of Origin 1.1
+
+By making a contribution to this project, I certify that:
+
+(a) The contribution was created in whole or in part by me and I
+    have the right to submit it under the open source license
+    indicated in the file; or
+
+(b) The contribution is based upon previous work that, to the best
+    of my knowledge, is covered under an appropriate open source
+    license and I have the right under that license to submit that
+    work with modifications, whether created in whole or in part
+    by me, under the same open source license (unless I am
+    permitted to submit under a different license), as indicated
+    in the file; or
+
+(c) The contribution was provided directly to me by some other
+    person who certified (a), (b) or (c) and I have not modified
+    it.
+
+(d) I understand and agree that this project and the contribution
+    are public and that a record of the contribution (including all
+    personal information I submit with it, including my sign-off) is
+    maintained indefinitely and may be redistributed consistent with
+    this project or the open source license(s) involved.
+```
+
+Then you just add a line to every git commit message:
+
+    Docker-DCO-1.1-Signed-off-by: Joe Smith <joe.smith@email.com> (github: github_handle)
+
+Using your real name (sorry, no pseudonyms or anonymous contributions.)
+
+One way to automate this, is customize your git `commit.template` by adding
+a `prepare-commit-msg` hook to your Docker repository:
+
+```
+curl -sSL -o .git/hooks/prepare-commit-msg https://raw.githubusercontent.com/dotcloud/docker/master/contrib/prepare-commit-msg.hook && chmod +x .git/hooks/prepare-commit-msg
+```
+
+* Note: the above script expects to find your GitHub user name in `git config --get github.user`
+
+#### Small patch exception
+
+There are several exceptions to the signing requirement. Currently these are:
+
+* Your patch fixes spelling or grammar errors.
+* Your patch is a single line change to documentation contained in the
+  `docs` directory.
+* Your patch fixes Markdown formatting or syntax errors in the
+  documentation contained in the `docs` directory.
+
+If you have any questions, please refer to the FAQ in the [docs](http://docs.docker.com)
+
 ### How can I become a maintainer?
 
-* Step 1: learn the component inside out
-* Step 2: make yourself useful by contributing code, bugfixes, support etc.
-* Step 3: volunteer on the irc channel (#docker@freenode)
+* Step 1: Learn the component inside out
+* Step 2: Make yourself useful by contributing code, bug fixes, support etc.
+* Step 3: Volunteer on the IRC channel (#docker at Freenode)
+* Step 4: Propose yourself at a scheduled docker meeting in #docker-dev
 
-Don't forget: being a maintainer is a time investment. Make sure you will have time to make yourself available.
-You don't have to be a maintainer to make a difference on the project!
+Don't forget: being a maintainer is a time investment. Make sure you
+will have time to make yourself available.  You don't have to be a
+maintainer to make a difference on the project!
 
