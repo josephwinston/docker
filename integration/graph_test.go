@@ -2,12 +2,13 @@ package docker
 
 import (
 	"errors"
-	"github.com/dotcloud/docker/archive"
-	"github.com/dotcloud/docker/daemon/graphdriver"
-	"github.com/dotcloud/docker/dockerversion"
-	"github.com/dotcloud/docker/graph"
-	"github.com/dotcloud/docker/image"
-	"github.com/dotcloud/docker/utils"
+	"github.com/docker/docker/autogen/dockerversion"
+	"github.com/docker/docker/daemon/graphdriver"
+	"github.com/docker/docker/graph"
+	"github.com/docker/docker/image"
+	"github.com/docker/docker/pkg/archive"
+	"github.com/docker/docker/pkg/common"
+	"github.com/docker/docker/utils"
 	"io"
 	"io/ioutil"
 	"os"
@@ -69,12 +70,12 @@ func TestInterruptedRegister(t *testing.T) {
 	defer nukeGraph(graph)
 	badArchive, w := io.Pipe() // Use a pipe reader as a fake archive which never yields data
 	image := &image.Image{
-		ID:      utils.GenerateRandomID(),
+		ID:      common.GenerateRandomID(),
 		Comment: "testing",
 		Created: time.Now(),
 	}
 	w.CloseWithError(errors.New("But I'm not a tarball!")) // (Nobody's perfect, darling)
-	graph.Register(nil, badArchive, image)
+	graph.Register(image, badArchive)
 	if _, err := graph.Get(image.ID); err == nil {
 		t.Fatal("Image should not exist after Register is interrupted")
 	}
@@ -83,7 +84,7 @@ func TestInterruptedRegister(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := graph.Register(nil, goodArchive, image); err != nil {
+	if err := graph.Register(image, goodArchive); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -129,11 +130,11 @@ func TestRegister(t *testing.T) {
 		t.Fatal(err)
 	}
 	image := &image.Image{
-		ID:      utils.GenerateRandomID(),
+		ID:      common.GenerateRandomID(),
 		Comment: "testing",
 		Created: time.Now(),
 	}
-	err = graph.Register(nil, archive, image)
+	err = graph.Register(image, archive)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func TestDeletePrefix(t *testing.T) {
 	graph, _ := tempGraph(t)
 	defer nukeGraph(graph)
 	img := createTestImage(graph, t)
-	if err := graph.Delete(utils.TruncateID(img.ID)); err != nil {
+	if err := graph.Delete(common.TruncateID(img.ID)); err != nil {
 		t.Fatal(err)
 	}
 	assertNImages(graph, t, 0)
@@ -228,7 +229,7 @@ func TestDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Test delete twice (pull -> rm -> pull -> rm)
-	if err := graph.Register(nil, archive, img1); err != nil {
+	if err := graph.Register(img1, archive); err != nil {
 		t.Fatal(err)
 	}
 	if err := graph.Delete(img1.ID); err != nil {
@@ -245,26 +246,26 @@ func TestByParent(t *testing.T) {
 	graph, _ := tempGraph(t)
 	defer nukeGraph(graph)
 	parentImage := &image.Image{
-		ID:      utils.GenerateRandomID(),
+		ID:      common.GenerateRandomID(),
 		Comment: "parent",
 		Created: time.Now(),
 		Parent:  "",
 	}
 	childImage1 := &image.Image{
-		ID:      utils.GenerateRandomID(),
+		ID:      common.GenerateRandomID(),
 		Comment: "child1",
 		Created: time.Now(),
 		Parent:  parentImage.ID,
 	}
 	childImage2 := &image.Image{
-		ID:      utils.GenerateRandomID(),
+		ID:      common.GenerateRandomID(),
 		Comment: "child2",
 		Created: time.Now(),
 		Parent:  parentImage.ID,
 	}
-	_ = graph.Register(nil, archive1, parentImage)
-	_ = graph.Register(nil, archive2, childImage1)
-	_ = graph.Register(nil, archive3, childImage2)
+	_ = graph.Register(parentImage, archive1)
+	_ = graph.Register(childImage1, archive2)
+	_ = graph.Register(childImage2, archive3)
 
 	byParent, err := graph.ByParent()
 	if err != nil {

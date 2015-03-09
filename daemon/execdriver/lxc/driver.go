@@ -2,64 +2,48 @@ package lxc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	log "github.com/Sirupsen/logrus"
+	"github.com/docker/docker/daemon/execdriver"
+	sysinfo "github.com/docker/docker/pkg/system"
+	"github.com/docker/docker/pkg/term"
+	"github.com/docker/docker/utils"
+	"github.com/docker/libcontainer"
 	"github.com/docker/libcontainer/cgroups"
-	"github.com/docker/libcontainer/label"
 	"github.com/docker/libcontainer/mount/nodes"
-	"github.com/dotcloud/docker/daemon/execdriver"
-	"github.com/dotcloud/docker/pkg/term"
-	"github.com/dotcloud/docker/utils"
 	"github.com/kr/pty"
 )
 
 const DriverName = "lxc"
 
-func init() {
-	execdriver.RegisterInitFunc(DriverName, func(args *execdriver.InitArgs) error {
-		runtime.LockOSThread()
-		if err := setupEnv(args); err != nil {
-			return err
-		}
-		if err := setupHostname(args); err != nil {
-			return err
-		}
-		if err := setupNetworking(args); err != nil {
-			return err
-		}
-		if err := finalizeNamespace(args); err != nil {
-			return err
-		}
-
-		path, err := exec.LookPath(args.Args[0])
-		if err != nil {
-			log.Printf("Unable to locate %v", args.Args[0])
-			os.Exit(127)
-		}
-		if err := syscall.Exec(path, args.Args, os.Environ()); err != nil {
-			return fmt.Errorf("dockerinit unable to execute %s - %s", path, err)
-		}
-		panic("Unreachable")
-	})
-}
+var ErrExec = errors.New("Unsupported: Exec is not supported by the lxc driver")
 
 type driver struct {
-	root       string // root path for the driver to use
-	initPath   string
-	apparmor   bool
-	sharedRoot bool
+	root             string // root path for the driver to use
+	initPath         string
+	apparmor         bool
+	sharedRoot       bool
+	activeContainers map[string]*activeContainer
+	machineMemory    int64
+	sync.Mutex
+}
+
+type activeContainer struct {
+	container *libcontainer.Config
+	cmd       *exec.Cmd
 }
 
 func NewDriver(root, initPath string, apparmor bool) (*driver, error) {
@@ -67,11 +51,17 @@ func NewDriver(root, initPath string, apparmor bool) (*driver, error) {
 	if err := linkLxcStart(root); err != nil {
 		return nil, err
 	}
+	meminfo, err := sysinfo.ReadMemInfo()
+	if err != nil {
+		return nil, err
+	}
 	return &driver{
-		apparmor:   apparmor,
-		root:       root,
-		initPath:   initPath,
-		sharedRoot: rootIsShared(),
+		apparmor:         apparmor,
+		root:             root,
+		initPath:         initPath,
+		sharedRoot:       rootIsShared(),
+		activeContainers: make(map[string]*activeContainer),
+		machineMemory:    meminfo.MemTotal,
 	}, nil
 }
 
@@ -80,38 +70,70 @@ func (d *driver) Name() string {
 	return fmt.Sprintf("%s-%s", DriverName, version)
 }
 
-func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (int, error) {
+func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (execdriver.ExitStatus, error) {
 	var (
-		term execdriver.Terminal
-		err  error
+		term     execdriver.Terminal
+		err      error
+		dataPath = d.containerDir(c.ID)
 	)
 
-	if c.Tty {
-		term, err = NewTtyConsole(c, pipes)
+	if c.ProcessConfig.Tty {
+		term, err = NewTtyConsole(&c.ProcessConfig, pipes)
 	} else {
-		term, err = execdriver.NewStdConsole(c, pipes)
+		term, err = execdriver.NewStdConsole(&c.ProcessConfig, pipes)
 	}
-	c.Terminal = term
+	c.ProcessConfig.Terminal = term
+	container, err := d.createContainer(c)
+	if err != nil {
+		return execdriver.ExitStatus{ExitCode: -1}, err
+	}
+	d.Lock()
+	d.activeContainers[c.ID] = &activeContainer{
+		container: container,
+		cmd:       &c.ProcessConfig.Cmd,
+	}
+	d.Unlock()
 
-	c.Mounts = append(c.Mounts, execdriver.Mount{d.initPath, c.InitPath, false, true})
+	c.Mounts = append(c.Mounts, execdriver.Mount{
+		Source:      d.initPath,
+		Destination: c.InitPath,
+		Writable:    false,
+		Private:     true,
+	})
 
 	if err := d.generateEnvConfig(c); err != nil {
-		return -1, err
+		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
 	configPath, err := d.generateLXCConfig(c)
 	if err != nil {
-		return -1, err
+		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
 	params := []string{
 		"lxc-start",
 		"-n", c.ID,
 		"-f", configPath,
-		"--",
-		c.InitPath,
-		"-driver",
-		DriverName,
+	}
+	if c.Network.ContainerID != "" {
+		params = append(params,
+			"--share-net", c.Network.ContainerID,
+		)
+	}
+	if c.Ipc != nil {
+		if c.Ipc.ContainerID != "" {
+			params = append(params,
+				"--share-ipc", c.Ipc.ContainerID,
+			)
+		} else if c.Ipc.HostIpc {
+			params = append(params,
+				"--share-ipc", "1",
+			)
+		}
 	}
 
+	params = append(params,
+		"--",
+		c.InitPath,
+	)
 	if c.Network.Interface != nil {
 		params = append(params,
 			"-g", c.Network.Interface.Gateway,
@@ -122,11 +144,11 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 		"-mtu", strconv.Itoa(c.Network.Mtu),
 	)
 
-	if c.User != "" {
-		params = append(params, "-u", c.User)
+	if c.ProcessConfig.User != "" {
+		params = append(params, "-u", c.ProcessConfig.User)
 	}
 
-	if c.Privileged {
+	if c.ProcessConfig.Privileged {
 		if d.apparmor {
 			params[0] = path.Join(d.root, "lxc-start-unconfined")
 
@@ -138,16 +160,8 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 		params = append(params, "-w", c.WorkingDir)
 	}
 
-	if len(c.CapAdd) > 0 {
-		params = append(params, "-cap-add", strings.Join(c.CapAdd, " "))
-	}
-
-	if len(c.CapDrop) > 0 {
-		params = append(params, "-cap-drop", strings.Join(c.CapDrop, " "))
-	}
-
-	params = append(params, "--", c.Entrypoint)
-	params = append(params, c.Arguments...)
+	params = append(params, "--", c.ProcessConfig.Entrypoint)
+	params = append(params, c.ProcessConfig.Arguments...)
 
 	if d.sharedRoot {
 		// lxc-start really needs / to be non-shared, or all kinds of stuff break
@@ -164,7 +178,7 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 			"unshare", "-m", "--", "/bin/sh", "-c", shellString,
 		}
 	}
-
+	log.Debugf("lxc params %s", params)
 	var (
 		name = params[0]
 		arg  = params[1:]
@@ -173,15 +187,15 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 	if err != nil {
 		aname = name
 	}
-	c.Path = aname
-	c.Args = append([]string{name}, arg...)
+	c.ProcessConfig.Path = aname
+	c.ProcessConfig.Args = append([]string{name}, arg...)
 
 	if err := nodes.CreateDeviceNodes(c.Rootfs, c.AutoCreatedDevices); err != nil {
-		return -1, err
+		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
 
-	if err := c.Start(); err != nil {
-		return -1, err
+	if err := c.ProcessConfig.Start(); err != nil {
+		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
 
 	var (
@@ -190,7 +204,7 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 	)
 
 	go func() {
-		if err := c.Wait(); err != nil {
+		if err := c.ProcessConfig.Wait(); err != nil {
 			if _, ok := err.(*exec.ExitError); !ok { // Do not propagate the error if it's simply a status code != 0
 				waitErr = err
 			}
@@ -198,34 +212,98 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 		close(waitLock)
 	}()
 
+	terminate := func(terr error) (execdriver.ExitStatus, error) {
+		if c.ProcessConfig.Process != nil {
+			c.ProcessConfig.Process.Kill()
+			c.ProcessConfig.Wait()
+		}
+		return execdriver.ExitStatus{ExitCode: -1}, terr
+	}
 	// Poll lxc for RUNNING status
 	pid, err := d.waitForStart(c, waitLock)
 	if err != nil {
-		if c.Process != nil {
-			c.Process.Kill()
-			c.Wait()
-		}
-		return -1, err
+		return terminate(err)
+	}
+
+	cgroupPaths, err := cgroupPaths(c.ID)
+	if err != nil {
+		return terminate(err)
+	}
+
+	state := &libcontainer.State{
+		InitPid:     pid,
+		CgroupPaths: cgroupPaths,
+	}
+
+	if err := libcontainer.SaveState(dataPath, state); err != nil {
+		return terminate(err)
 	}
 
 	c.ContainerPid = pid
 
 	if startCallback != nil {
-		startCallback(c)
+		log.Debugf("Invoking startCallback")
+		startCallback(&c.ProcessConfig, pid)
+	}
+	oomKill := false
+	oomKillNotification, err := libcontainer.NotifyOnOOM(state)
+	if err == nil {
+		_, oomKill = <-oomKillNotification
+		log.Debugf("oomKill error %s waitErr %s", oomKill, waitErr)
+
+	} else {
+		log.Warnf("WARNING: Your kernel does not support OOM notifications: %s", err)
 	}
 
 	<-waitLock
 
-	return getExitCode(c), waitErr
+	// check oom error
+	exitCode := getExitCode(c)
+	if oomKill {
+		exitCode = 137
+	}
+	return execdriver.ExitStatus{ExitCode: exitCode, OOMKilled: oomKill}, waitErr
+}
+
+// createContainer populates and configures the container type with the
+// data provided by the execdriver.Command
+func (d *driver) createContainer(c *execdriver.Command) (*libcontainer.Config, error) {
+	container := execdriver.InitContainer(c)
+	if err := execdriver.SetupCgroups(container, c); err != nil {
+		return nil, err
+	}
+	return container, nil
+}
+
+// Return an map of susbystem -> container cgroup
+func cgroupPaths(containerId string) (map[string]string, error) {
+	subsystems, err := cgroups.GetAllSubsystems()
+	if err != nil {
+		return nil, err
+	}
+	log.Debugf("subsystems: %s", subsystems)
+	paths := make(map[string]string)
+	for _, subsystem := range subsystems {
+		cgroupRoot, cgroupDir, err := findCgroupRootAndDir(subsystem)
+		log.Debugf("cgroup path %s %s", cgroupRoot, cgroupDir)
+		if err != nil {
+			//unsupported subystem
+			continue
+		}
+		path := filepath.Join(cgroupRoot, cgroupDir, "lxc", containerId)
+		paths[subsystem] = path
+	}
+
+	return paths, nil
 }
 
 /// Return the exit code of the process
 // if the process has not exited -1 will be returned
 func getExitCode(c *execdriver.Command) int {
-	if c.ProcessState == nil {
+	if c.ProcessConfig.ProcessState == nil {
 		return -1
 	}
-	return c.ProcessState.Sys().(syscall.WaitStatus).ExitStatus()
+	return c.ProcessConfig.ProcessState.Sys().(syscall.WaitStatus).ExitStatus()
 }
 
 func (d *driver) Kill(c *execdriver.Command, sig int) error {
@@ -344,7 +422,7 @@ func (i *info) IsRunning() bool {
 
 	output, err := i.driver.getInfo(i.ID)
 	if err != nil {
-		utils.Errorf("Error getting info for lxc container %s: %s (%s)", i.ID, err, output)
+		log.Errorf("Error getting info for lxc container %s: %s (%s)", i.ID, err, output)
 		return false
 	}
 	if strings.Contains(string(output), "RUNNING") {
@@ -360,17 +438,25 @@ func (d *driver) Info(id string) execdriver.Info {
 	}
 }
 
+func findCgroupRootAndDir(subsystem string) (string, string, error) {
+	cgroupRoot, err := cgroups.FindCgroupMountpoint(subsystem)
+	if err != nil {
+		return "", "", err
+	}
+
+	cgroupDir, err := cgroups.GetThisCgroupDir(subsystem)
+	if err != nil {
+		return "", "", err
+	}
+	return cgroupRoot, cgroupDir, nil
+}
+
 func (d *driver) GetPidsForContainer(id string) ([]int, error) {
 	pids := []int{}
 
 	// cpu is chosen because it is the only non optional subsystem in cgroups
 	subsystem := "cpu"
-	cgroupRoot, err := cgroups.FindCgroupMountpoint(subsystem)
-	if err != nil {
-		return pids, err
-	}
-
-	cgroupDir, err := cgroups.GetThisCgroupDir(subsystem)
+	cgroupRoot, cgroupDir, err := findCgroupRootAndDir(subsystem)
 	if err != nil {
 		return pids, err
 	}
@@ -430,50 +516,51 @@ func rootIsShared() bool {
 	return true
 }
 
+func (d *driver) containerDir(containerId string) string {
+	return path.Join(d.root, "containers", containerId)
+}
+
 func (d *driver) generateLXCConfig(c *execdriver.Command) (string, error) {
-	var (
-		process, mount string
-		root           = path.Join(d.root, "containers", c.ID, "config.lxc")
-		labels         = c.Config["label"]
-	)
+	root := path.Join(d.containerDir(c.ID), "config.lxc")
+
 	fo, err := os.Create(root)
 	if err != nil {
 		return "", err
 	}
 	defer fo.Close()
 
-	if len(labels) > 0 {
-		process, mount, err = label.GenLabels(labels[0])
-		if err != nil {
-			return "", err
-		}
-	}
-
 	if err := LxcTemplateCompiled.Execute(fo, struct {
 		*execdriver.Command
-		AppArmor     bool
-		ProcessLabel string
-		MountLabel   string
+		AppArmor bool
 	}{
-		Command:      c,
-		AppArmor:     d.apparmor,
-		ProcessLabel: process,
-		MountLabel:   mount,
+		Command:  c,
+		AppArmor: d.apparmor,
 	}); err != nil {
 		return "", err
 	}
+
 	return root, nil
 }
 
 func (d *driver) generateEnvConfig(c *execdriver.Command) error {
-	data, err := json.Marshal(c.Env)
+	data, err := json.Marshal(c.ProcessConfig.Env)
 	if err != nil {
 		return err
 	}
 	p := path.Join(d.root, "containers", c.ID, "config.env")
-	c.Mounts = append(c.Mounts, execdriver.Mount{p, "/.dockerenv", false, true})
+	c.Mounts = append(c.Mounts, execdriver.Mount{
+		Source:      p,
+		Destination: "/.dockerenv",
+		Writable:    false,
+		Private:     true,
+	})
 
 	return ioutil.WriteFile(p, data, 0600)
+}
+
+// Clean not implemented for lxc
+func (d *driver) Clean(id string) error {
+	return nil
 }
 
 type TtyConsole struct {
@@ -481,7 +568,7 @@ type TtyConsole struct {
 	SlavePty  *os.File
 }
 
-func NewTtyConsole(command *execdriver.Command, pipes *execdriver.Pipes) (*TtyConsole, error) {
+func NewTtyConsole(processConfig *execdriver.ProcessConfig, pipes *execdriver.Pipes) (*TtyConsole, error) {
 	// lxc is special in that we cannot create the master outside of the container without
 	// opening the slave because we have nothing to provide to the cmd.  We have to open both then do
 	// the crazy setup on command right now instead of passing the console path to lxc and telling it
@@ -497,12 +584,12 @@ func NewTtyConsole(command *execdriver.Command, pipes *execdriver.Pipes) (*TtyCo
 		SlavePty:  ptySlave,
 	}
 
-	if err := tty.AttachPipes(&command.Cmd, pipes); err != nil {
+	if err := tty.AttachPipes(&processConfig.Cmd, pipes); err != nil {
 		tty.Close()
 		return nil, err
 	}
 
-	command.Console = tty.SlavePty.Name()
+	processConfig.Console = tty.SlavePty.Name()
 
 	return tty, nil
 }
@@ -545,4 +632,12 @@ func (t *TtyConsole) AttachPipes(command *exec.Cmd, pipes *execdriver.Pipes) err
 func (t *TtyConsole) Close() error {
 	t.SlavePty.Close()
 	return t.MasterPty.Close()
+}
+
+func (d *driver) Exec(c *execdriver.Command, processConfig *execdriver.ProcessConfig, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (int, error) {
+	return -1, ErrExec
+}
+
+func (d *driver) Stats(id string) (*execdriver.ResourceStats, error) {
+	return execdriver.Stats(d.containerDir(id), d.activeContainers[id].container.Cgroups.Memory, d.machineMemory)
 }

@@ -1,20 +1,43 @@
 package main
 
 import (
-	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
 )
 
 func TestImportDisplay(t *testing.T) {
-	importCmd := exec.Command(dockerBinary, "import", "https://github.com/ewindisch/docker-cirros/raw/master/cirros-0.3.0-x86_64-lxc.tar.gz")
-	out, _, err := runCommandWithOutput(importCmd)
-	errorOut(err, t, fmt.Sprintf("import failed with errors: %v", err))
+	runCmd := exec.Command(dockerBinary, "run", "-d", "busybox", "true")
+	out, _, err := runCommandWithOutput(runCmd)
+	if err != nil {
+		t.Fatal("failed to create a container", out, err)
+	}
+	cleanedContainerID := stripTrailingCharacters(out)
+	defer deleteContainer(cleanedContainerID)
 
-	if n := len(strings.Split(out, "\n")); n != 3 {
-		t.Fatalf("display is messed up: %d '\\n' instead of 3", n)
+	out, _, err = runCommandPipelineWithOutput(
+		exec.Command(dockerBinary, "export", cleanedContainerID),
+		exec.Command(dockerBinary, "import", "-"),
+	)
+	if err != nil {
+		t.Errorf("import failed with errors: %v, output: %q", err, out)
 	}
 
-	logDone("import - cirros was imported and display is fine")
+	if n := strings.Count(out, "\n"); n != 1 {
+		t.Fatalf("display is messed up: %d '\\n' instead of 1:\n%s", n, out)
+	}
+	image := strings.TrimSpace(out)
+	defer deleteImages(image)
+
+	runCmd = exec.Command(dockerBinary, "run", "--rm", image, "true")
+	out, _, err = runCommandWithOutput(runCmd)
+	if err != nil {
+		t.Fatal("failed to create a container", out, err)
+	}
+
+	if out != "" {
+		t.Fatalf("command output should've been nothing, was %q", out)
+	}
+
+	logDone("import - display is fine, imported image runs")
 }

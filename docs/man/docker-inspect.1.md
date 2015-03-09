@@ -6,6 +6,7 @@ docker-inspect - Return low-level information on a container or image
 
 # SYNOPSIS
 **docker inspect**
+[**--help**]
 [**-f**|**--format**[=*FORMAT*]]
 CONTAINER|IMAGE [CONTAINER|IMAGE...]
 
@@ -17,6 +18,9 @@ array. If a format is specified, the given template will be executed for
 each result.
 
 # OPTIONS
+**--help**
+  Print usage statement
+
 **-f**, **--format**=""
    Format the output using the given go template.
 
@@ -97,6 +101,7 @@ To get information on a container use it's ID or instance name:
         "ResolvConfPath": "/etc/resolv.conf",
         "HostnamePath": "/var/lib/docker/containers/1eb5fabf5a03807136561b3c00adcd2992b535d624d5e18b6cdc6a6844d9767b/hostname",
         "HostsPath": "/var/lib/docker/containers/1eb5fabf5a03807136561b3c00adcd2992b535d624d5e18b6cdc6a6844d9767b/hosts",
+        "LogPath": "/var/lib/docker/containers/1eb5fabf5a03807136561b3c00adcd2992b535d624d5e18b6cdc6a6844d9767b/1eb5fabf5a03807136561b3c00adcd2992b535d624d5e18b6cdc6a6844d9767b-json.log",
         "Name": "/ecstatic_ptolemy",
         "Driver": "devicemapper",
         "ExecDriver": "native-0.1",

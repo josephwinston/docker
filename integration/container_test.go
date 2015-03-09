@@ -1,75 +1,13 @@
 package docker
 
 import (
-	"fmt"
 	"io"
 	"io/ioutil"
-	"os"
-	"path"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/dotcloud/docker/runconfig"
+	"github.com/docker/docker/runconfig"
 )
-
-func TestKillDifferentUser(t *testing.T) {
-	daemon := mkDaemon(t)
-	defer nuke(daemon)
-
-	container, _, err := daemon.Create(&runconfig.Config{
-		Image:     GetTestImage(daemon).ID,
-		Cmd:       []string{"cat"},
-		OpenStdin: true,
-		User:      "daemon",
-	},
-		"",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer daemon.Destroy(container)
-	// FIXME @shykes: this seems redundant, but is very old, I'm leaving it in case
-	// there is a side effect I'm not seeing.
-	// defer container.stdin.Close()
-
-	if container.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-	if err := container.Start(); err != nil {
-		t.Fatal(err)
-	}
-
-	setTimeout(t, "Waiting for the container to be started timed out", 2*time.Second, func() {
-		for !container.State.IsRunning() {
-			time.Sleep(10 * time.Millisecond)
-		}
-	})
-
-	setTimeout(t, "read/write assertion timed out", 2*time.Second, func() {
-		out, _ := container.StdoutPipe()
-		in, _ := container.StdinPipe()
-		if err := assertPipe("hello\n", "hello", out, in, 150); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	if err := container.Kill(); err != nil {
-		t.Fatal(err)
-	}
-
-	if container.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-	container.State.WaitStop(-1 * time.Second)
-	if container.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-	// Try stopping twice
-	if err := container.Kill(); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestRestartStdin(t *testing.T) {
 	daemon := mkDaemon(t)
@@ -80,21 +18,16 @@ func TestRestartStdin(t *testing.T) {
 
 		OpenStdin: true,
 	},
+		&runconfig.HostConfig{},
 		"",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer daemon.Destroy(container)
+	defer daemon.Rm(container)
 
-	stdin, err := container.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := container.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	stdin := container.StdinPipe()
+	stdout := container.StdoutPipe()
 	if err := container.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +37,7 @@ func TestRestartStdin(t *testing.T) {
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
 	}
-	container.State.WaitStop(-1 * time.Second)
+	container.WaitStop(-1 * time.Second)
 	output, err := ioutil.ReadAll(stdout)
 	if err != nil {
 		t.Fatal(err)
@@ -117,14 +50,8 @@ func TestRestartStdin(t *testing.T) {
 	}
 
 	// Restart and try again
-	stdin, err = container.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err = container.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	stdin = container.StdinPipe()
+	stdout = container.StdoutPipe()
 	if err := container.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +61,7 @@ func TestRestartStdin(t *testing.T) {
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
 	}
-	container.State.WaitStop(-1 * time.Second)
+	container.WaitStop(-1 * time.Second)
 	output, err = ioutil.ReadAll(stdout)
 	if err != nil {
 		t.Fatal(err)
@@ -156,21 +83,16 @@ func TestStdin(t *testing.T) {
 
 		OpenStdin: true,
 	},
+		&runconfig.HostConfig{},
 		"",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer daemon.Destroy(container)
+	defer daemon.Rm(container)
 
-	stdin, err := container.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := container.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	stdin := container.StdinPipe()
+	stdout := container.StdoutPipe()
 	if err := container.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +104,7 @@ func TestStdin(t *testing.T) {
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
 	}
-	container.State.WaitStop(-1 * time.Second)
+	container.WaitStop(-1 * time.Second)
 	output, err := ioutil.ReadAll(stdout)
 	if err != nil {
 		t.Fatal(err)
@@ -201,21 +123,16 @@ func TestTty(t *testing.T) {
 
 		OpenStdin: true,
 	},
+		&runconfig.HostConfig{},
 		"",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer daemon.Destroy(container)
+	defer daemon.Rm(container)
 
-	stdin, err := container.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := container.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	stdin := container.StdinPipe()
+	stdout := container.StdoutPipe()
 	if err := container.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -227,60 +144,13 @@ func TestTty(t *testing.T) {
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
 	}
-	container.State.WaitStop(-1 * time.Second)
+	container.WaitStop(-1 * time.Second)
 	output, err := ioutil.ReadAll(stdout)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(output) != "hello world" {
 		t.Fatalf("Unexpected output. Expected %s, received: %s", "hello world", string(output))
-	}
-}
-
-func TestEntrypoint(t *testing.T) {
-	daemon := mkDaemon(t)
-	defer nuke(daemon)
-	container, _, err := daemon.Create(
-		&runconfig.Config{
-			Image:      GetTestImage(daemon).ID,
-			Entrypoint: []string{"/bin/echo"},
-			Cmd:        []string{"-n", "foobar"},
-		},
-		"",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer daemon.Destroy(container)
-	output, err := container.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(output) != "foobar" {
-		t.Error(string(output))
-	}
-}
-
-func TestEntrypointNoCmd(t *testing.T) {
-	daemon := mkDaemon(t)
-	defer nuke(daemon)
-	container, _, err := daemon.Create(
-		&runconfig.Config{
-			Image:      GetTestImage(daemon).ID,
-			Entrypoint: []string{"/bin/echo", "foobar"},
-		},
-		"",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer daemon.Destroy(container)
-	output, err := container.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Trim(string(output), "\r\n") != "foobar" {
-		t.Error(string(output))
 	}
 }
 
@@ -292,12 +162,13 @@ func BenchmarkRunSequential(b *testing.B) {
 			Image: GetTestImage(daemon).ID,
 			Cmd:   []string{"echo", "-n", "foo"},
 		},
+			&runconfig.HostConfig{},
 			"",
 		)
 		if err != nil {
 			b.Fatal(err)
 		}
-		defer daemon.Destroy(container)
+		defer daemon.Rm(container)
 		output, err := container.Output()
 		if err != nil {
 			b.Fatal(err)
@@ -305,7 +176,7 @@ func BenchmarkRunSequential(b *testing.B) {
 		if string(output) != "foo" {
 			b.Fatalf("Unexpected output: %s", output)
 		}
-		if err := daemon.Destroy(container); err != nil {
+		if err := daemon.Rm(container); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -325,25 +196,26 @@ func BenchmarkRunParallel(b *testing.B) {
 				Image: GetTestImage(daemon).ID,
 				Cmd:   []string{"echo", "-n", "foo"},
 			},
+				&runconfig.HostConfig{},
 				"",
 			)
 			if err != nil {
 				complete <- err
 				return
 			}
-			defer daemon.Destroy(container)
+			defer daemon.Rm(container)
 			if err := container.Start(); err != nil {
 				complete <- err
 				return
 			}
-			if _, err := container.State.WaitStop(15 * time.Second); err != nil {
+			if _, err := container.WaitStop(15 * time.Second); err != nil {
 				complete <- err
 				return
 			}
 			// if string(output) != "foo" {
 			// 	complete <- fmt.Errorf("Unexecpted output: %v", string(output))
 			// }
-			if err := daemon.Destroy(container); err != nil {
+			if err := daemon.Rm(container); err != nil {
 				complete <- err
 				return
 			}
@@ -359,139 +231,5 @@ func BenchmarkRunParallel(b *testing.B) {
 	}
 	if len(errors) > 0 {
 		b.Fatal(errors)
-	}
-}
-
-func tempDir(t *testing.T) string {
-	tmpDir, err := ioutil.TempDir("", "docker-test-container")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tmpDir
-}
-
-// Test for #1737
-func TestCopyVolumeUidGid(t *testing.T) {
-	eng := NewTestEngine(t)
-	r := mkDaemonFromEngine(eng, t)
-	defer r.Nuke()
-
-	// Add directory not owned by root
-	container1, _, _ := mkContainer(r, []string{"_", "/bin/sh", "-c", "mkdir -p /hello && touch /hello/test && chown daemon.daemon /hello"}, t)
-	defer r.Destroy(container1)
-
-	if container1.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-	if err := container1.Run(); err != nil {
-		t.Fatal(err)
-	}
-	if container1.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-
-	img, err := r.Commit(container1, "", "", "unit test commited image", "", true, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	// Test that the uid and gid is copied from the image to the volume
-	tmpDir1 := tempDir(t)
-	defer os.RemoveAll(tmpDir1)
-	stdout1, _ := runContainer(eng, r, []string{"-v", "/hello", img.ID, "stat", "-c", "%U %G", "/hello"}, t)
-	if !strings.Contains(stdout1, "daemon daemon") {
-		t.Fatal("Container failed to transfer uid and gid to volume")
-	}
-
-	container2, _, _ := mkContainer(r, []string{"_", "/bin/sh", "-c", "mkdir -p /hello && chown daemon.daemon /hello"}, t)
-	defer r.Destroy(container1)
-
-	if container2.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-	if err := container2.Run(); err != nil {
-		t.Fatal(err)
-	}
-	if container2.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-
-	img2, err := r.Commit(container2, "", "", "unit test commited image", "", true, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	// Test that the uid and gid is copied from the image to the volume
-	tmpDir2 := tempDir(t)
-	defer os.RemoveAll(tmpDir2)
-	stdout2, _ := runContainer(eng, r, []string{"-v", "/hello", img2.ID, "stat", "-c", "%U %G", "/hello"}, t)
-	if !strings.Contains(stdout2, "daemon daemon") {
-		t.Fatal("Container failed to transfer uid and gid to volume")
-	}
-}
-
-// Test for #1582
-func TestCopyVolumeContent(t *testing.T) {
-	eng := NewTestEngine(t)
-	r := mkDaemonFromEngine(eng, t)
-	defer r.Nuke()
-
-	// Put some content in a directory of a container and commit it
-	container1, _, _ := mkContainer(r, []string{"_", "/bin/sh", "-c", "mkdir -p /hello/local && echo hello > /hello/local/world"}, t)
-	defer r.Destroy(container1)
-
-	if container1.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-	if err := container1.Run(); err != nil {
-		t.Fatal(err)
-	}
-	if container1.State.IsRunning() {
-		t.Errorf("Container shouldn't be running")
-	}
-
-	img, err := r.Commit(container1, "", "", "unit test commited image", "", true, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	// Test that the content is copied from the image to the volume
-	tmpDir1 := tempDir(t)
-	defer os.RemoveAll(tmpDir1)
-	stdout1, _ := runContainer(eng, r, []string{"-v", "/hello", img.ID, "find", "/hello"}, t)
-	if !(strings.Contains(stdout1, "/hello/local/world") && strings.Contains(stdout1, "/hello/local")) {
-		t.Fatal("Container failed to transfer content to volume")
-	}
-}
-
-func TestBindMounts(t *testing.T) {
-	eng := NewTestEngine(t)
-	r := mkDaemonFromEngine(eng, t)
-	defer r.Nuke()
-
-	tmpDir := tempDir(t)
-	defer os.RemoveAll(tmpDir)
-	writeFile(path.Join(tmpDir, "touch-me"), "", t)
-
-	// Test reading from a read-only bind mount
-	stdout, _ := runContainer(eng, r, []string{"-v", fmt.Sprintf("%s:/tmp:ro", tmpDir), "_", "ls", "/tmp"}, t)
-	if !strings.Contains(stdout, "touch-me") {
-		t.Fatal("Container failed to read from bind mount")
-	}
-
-	// test writing to bind mount
-	runContainer(eng, r, []string{"-v", fmt.Sprintf("%s:/tmp:rw", tmpDir), "_", "touch", "/tmp/holla"}, t)
-	readFile(path.Join(tmpDir, "holla"), t) // Will fail if the file doesn't exist
-
-	// test mounting to an illegal destination directory
-	if _, err := runContainer(eng, r, []string{"-v", fmt.Sprintf("%s:.", tmpDir), "_", "ls", "."}, nil); err == nil {
-		t.Fatal("Container bind mounted illegal directory")
-	}
-
-	// test mount a file
-	runContainer(eng, r, []string{"-v", fmt.Sprintf("%s/holla:/tmp/holla:rw", tmpDir), "_", "sh", "-c", "echo -n 'yotta' > /tmp/holla"}, t)
-	content := readFile(path.Join(tmpDir, "holla"), t) // Will fail if the file doesn't exist
-	if content != "yotta" {
-		t.Fatal("Container failed to write to bind mount file")
 	}
 }

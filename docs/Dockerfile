@@ -1,41 +1,66 @@
 #
-# See the top level Makefile in https://github.com/dotcloud/docker for usage.
+# See the top level Makefile in https://github.com/docker/docker for usage.
 #
-FROM 		debian:jessie
-MAINTAINER	Sven Dowideit <SvenDowideit@docker.com> (@SvenDowideit)
+FROM docs/base:latest
+MAINTAINER Sven Dowideit <SvenDowideit@docker.com> (@SvenDowideit)
 
-RUN 	apt-get update && apt-get install -yq make python-pip python-setuptools vim-tiny git gettext
+# TODO: need the full repo source to get the git version info
+COPY . /src
 
-RUN	pip install mkdocs
+# Reset the /docs dir so we can replace the theme meta with the new repo's git info
+RUN git reset --hard
 
-# add MarkdownTools to get transclusion
-# (future development)
-#RUN	easy_install -U setuptools
-#RUN	pip install MarkdownTools2
+# Then copy the desired docs into the /docs/sources/ dir
+COPY ./sources/ /docs/sources
 
-# this version works, the current versions fail in different ways
-RUN	pip install awscli==1.3.9
+COPY ./VERSION VERSION
 
-# get my sitemap.xml branch of mkdocs and use that for now
-RUN	git clone https://github.com/SvenDowideit/mkdocs	&&\
-	cd mkdocs/						&&\
-	git checkout docker-markdown-merge			&&\
-	./setup.py install
+# adding the image spec will require Docker 1.5 and `docker build -f docs/Dockerfile .`
+#COPY ./image/spec/v1.md /docs/sources/reference/image-spec-v1.md
 
-ADD 	. /docs
-ADD	MAINTAINERS /docs/sources/humans.txt
-WORKDIR	/docs
+# TODO: don't do this - look at merging the yml file in build.sh
+COPY ./mkdocs.yml mkdocs.yml
+COPY ./s3_website.json s3_website.json
 
-RUN	VERSION=$(cat /docs/VERSION)								&&\
-	GIT_BRANCH=$(cat /docs/GIT_BRANCH)							&&\
-	GITCOMMIT=$(cat /docs/GITCOMMIT)							&&\
-	AWS_S3_BUCKET=$(cat /docs/AWS_S3_BUCKET)						&&\
-	sed -i "s/\$VERSION/$VERSION/g" /docs/theme/mkdocs/base.html				&&\
-	sed -i "s/\$GITCOMMIT/$GITCOMMIT/g" /docs/theme/mkdocs/base.html			&&\
-	sed -i "s/\$GIT_BRANCH/$GIT_BRANCH/g" /docs/theme/mkdocs/base.html			&&\
-	sed -i "s/\$AWS_S3_BUCKET/$AWS_S3_BUCKET/g" /docs/theme/mkdocs/base.html
+# Docker Swarm
+#ADD https://raw.githubusercontent.com/docker/swarm/master/docs/mkdocs.yml /docs/mkdocs-swarm.yml
+ADD https://raw.githubusercontent.com/docker/swarm/master/docs/index.md /docs/sources/swarm/index.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/swarm/index.md
+ADD https://raw.githubusercontent.com/docker/swarm/master/discovery/README.md /docs/sources/swarm/discovery.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/swarm/discovery.md
+ADD https://raw.githubusercontent.com/docker/swarm/master/api/README.md /docs/sources/swarm/API.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/swarm/API.md
+ADD https://raw.githubusercontent.com/docker/swarm/master/scheduler/filter/README.md /docs/sources/swarm/scheduler/filter.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/swarm/scheduler/filter.md
+ADD https://raw.githubusercontent.com/docker/swarm/master/scheduler/strategy/README.md /docs/sources/swarm/scheduler/strategy.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/swarm/scheduler/strategy.md
 
-# note, EXPOSE is only last because of https://github.com/dotcloud/docker/issues/3525
-EXPOSE	8000
+# Docker Machine
+#ADD https://raw.githubusercontent.com/docker/machine/master/docs/mkdocs.yml /docs/mkdocs-machine.yml
+ADD https://raw.githubusercontent.com/docker/machine/master/docs/index.md /docs/sources/machine/index.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/machine/index.md
 
-CMD 	["mkdocs", "serve"]
+# Docker Compose
+#ADD https://raw.githubusercontent.com/docker/compose/master/docs/mkdocs.yml /docs/mkdocs-compose.yml
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/index.md /docs/sources/compose/index.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/index.md
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/install.md /docs/sources/compose/install.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/install.md
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/cli.md /docs/sources/compose/cli.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/cli.md
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/yml.md /docs/sources/compose/yml.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/yml.md
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/env.md /docs/sources/compose/env.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/env.md
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/completion.md /docs/sources/compose/completion.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/completion.md
+
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/django.md /docs/sources/compose/django.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/django.md
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/rails.md /docs/sources/compose/rails.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/rails.md
+ADD https://raw.githubusercontent.com/docker/compose/master/docs/wordpress.md /docs/sources/compose/wordpress.md
+RUN sed -i.old '1s;^;no_version_dropdown: true;' /docs/sources/compose/wordpress.md
+
+# Then build everything together, ready for mkdocs
+RUN /docs/build.sh

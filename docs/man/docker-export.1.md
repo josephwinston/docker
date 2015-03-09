@@ -6,6 +6,7 @@ docker-export - Export the contents of a filesystem as a tar archive to STDOUT
 
 # SYNOPSIS
 **docker export**
+[**--help**]
 CONTAINER
 
 # DESCRIPTION
@@ -14,7 +15,8 @@ container ID or container name. The output is exported to STDOUT and can be
 redirected to a tar file.
 
 # OPTIONS
-There are no available options.
+**--help**
+  Print usage statement
 
 # EXAMPLES
 Export the contents of the container called angry_bell to a tar file
@@ -23,6 +25,10 @@ called test.tar:
     # docker export angry_bell > test.tar
     # ls *.tar
     test.tar
+
+# See also
+**docker-import(1)** to create an empty filesystem image
+and import the contents of the tarball into it, then optionally tag it.
 
 # HISTORY
 April 2014, Originally compiled by William Henry (whenry at redhat dot com)
