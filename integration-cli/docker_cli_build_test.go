@@ -8,14 +8,12 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"text/template"
 	"time"
@@ -645,9 +643,10 @@ func TestBuildCacheADD(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
+
 	if _, err := buildImage(name,
 		fmt.Sprintf(`FROM scratch
-		ADD %s/robots.txt /`, server.URL),
+		ADD %s/robots.txt /`, server.URL()),
 		true); err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +656,7 @@ func TestBuildCacheADD(t *testing.T) {
 	deleteImages(name)
 	_, out, err := buildImageWithOut(name,
 		fmt.Sprintf(`FROM scratch
-		ADD %s/index.html /`, server.URL),
+		ADD %s/index.html /`, server.URL()),
 		true)
 	if err != nil {
 		t.Fatal(err)
@@ -667,6 +666,73 @@ func TestBuildCacheADD(t *testing.T) {
 	}
 
 	logDone("build - build two images with remote ADD")
+}
+
+func TestBuildLastModified(t *testing.T) {
+	name := "testbuildlastmodified"
+	defer deleteImages(name)
+
+	server, err := fakeStorage(map[string]string{
+		"file": "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	var out, out2 string
+
+	dFmt := `FROM busybox
+ADD %s/file /
+RUN ls -le /file`
+
+	dockerfile := fmt.Sprintf(dFmt, server.URL())
+
+	if _, out, err = buildImageWithOut(name, dockerfile, false); err != nil {
+		t.Fatal(err)
+	}
+
+	originMTime := regexp.MustCompile(`root.*/file.*\n`).FindString(out)
+	// Make sure our regexp is correct
+	if strings.Index(originMTime, "/file") < 0 {
+		t.Fatalf("Missing ls info on 'file':\n%s", out)
+	}
+
+	// Build it again and make sure the mtime of the file didn't change.
+	// Wait a few seconds to make sure the time changed enough to notice
+	time.Sleep(2 * time.Second)
+
+	if _, out2, err = buildImageWithOut(name, dockerfile, false); err != nil {
+		t.Fatal(err)
+	}
+
+	newMTime := regexp.MustCompile(`root.*/file.*\n`).FindString(out2)
+	if newMTime != originMTime {
+		t.Fatalf("MTime changed:\nOrigin:%s\nNew:%s", originMTime, newMTime)
+	}
+
+	// Now 'touch' the file and make sure the timestamp DID change this time
+	// Create a new fakeStorage instead of just using Add() to help windows
+	server, err = fakeStorage(map[string]string{
+		"file": "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	dockerfile = fmt.Sprintf(dFmt, server.URL())
+
+	if _, out2, err = buildImageWithOut(name, dockerfile, false); err != nil {
+		t.Fatal(err)
+	}
+
+	newMTime = regexp.MustCompile(`root.*/file.*\n`).FindString(out2)
+	if newMTime == originMTime {
+		t.Fatalf("MTime didn't change:\nOrigin:%s\nNew:%s", originMTime, newMTime)
+	}
+
+	logDone("build - use Last-Modified header")
 }
 
 func TestBuildSixtySteps(t *testing.T) {
@@ -797,7 +863,7 @@ RUN [ $(ls -l /exists/test_file4 | awk '{print $3":"$4}') = 'root:root' ]
 RUN [ $(ls -l /exists/robots.txt | awk '{print $3":"$4}') = 'root:root' ]
 
 RUN [ $(ls -l /exists/exists_file | awk '{print $3":"$4}') = 'dockerio:dockerio' ]
-`, server.URL),
+`, server.URL()),
 		map[string]string{
 			"test_file1": "test1",
 			"test_file2": "test2",
@@ -1084,6 +1150,7 @@ func TestBuildCopyWildcard(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
+
 	ctx, err := fakeContext(fmt.Sprintf(`FROM busybox
 	COPY file*.txt /tmp/
 	RUN ls /tmp/file1.txt /tmp/file2.txt
@@ -1093,7 +1160,7 @@ func TestBuildCopyWildcard(t *testing.T) {
 	RUN mkdir /tmp2
         ADD dir/*dir %s/robots.txt /tmp2/
 	RUN ls /tmp2/nest_nest_file /tmp2/robots.txt
-	`, server.URL),
+	`, server.URL()),
 		map[string]string{
 			"file1.txt":                     "test1",
 			"file2.txt":                     "test2",
@@ -2858,10 +2925,11 @@ func TestBuildADDRemoteFileWithCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
+
 	id1, err := buildImage(name,
 		fmt.Sprintf(`FROM scratch
         MAINTAINER dockerio
-        ADD %s/baz /usr/lib/baz/quux`, server.URL),
+        ADD %s/baz /usr/lib/baz/quux`, server.URL()),
 		true)
 	if err != nil {
 		t.Fatal(err)
@@ -2869,7 +2937,7 @@ func TestBuildADDRemoteFileWithCache(t *testing.T) {
 	id2, err := buildImage(name,
 		fmt.Sprintf(`FROM scratch
         MAINTAINER dockerio
-        ADD %s/baz /usr/lib/baz/quux`, server.URL),
+        ADD %s/baz /usr/lib/baz/quux`, server.URL()),
 		true)
 	if err != nil {
 		t.Fatal(err)
@@ -2891,10 +2959,11 @@ func TestBuildADDRemoteFileWithoutCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
+
 	id1, err := buildImage(name,
 		fmt.Sprintf(`FROM scratch
         MAINTAINER dockerio
-        ADD %s/baz /usr/lib/baz/quux`, server.URL),
+        ADD %s/baz /usr/lib/baz/quux`, server.URL()),
 		true)
 	if err != nil {
 		t.Fatal(err)
@@ -2902,7 +2971,7 @@ func TestBuildADDRemoteFileWithoutCache(t *testing.T) {
 	id2, err := buildImage(name2,
 		fmt.Sprintf(`FROM scratch
         MAINTAINER dockerio
-        ADD %s/baz /usr/lib/baz/quux`, server.URL),
+        ADD %s/baz /usr/lib/baz/quux`, server.URL()),
 		false)
 	if err != nil {
 		t.Fatal(err)
@@ -2921,7 +2990,8 @@ func TestBuildADDRemoteFileMTime(t *testing.T) {
 
 	defer deleteImages(name, name2, name3, name4)
 
-	server, err := fakeStorage(map[string]string{"baz": "hello"})
+	files := map[string]string{"baz": "hello"}
+	server, err := fakeStorage(files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2929,7 +2999,7 @@ func TestBuildADDRemoteFileMTime(t *testing.T) {
 
 	ctx, err := fakeContext(fmt.Sprintf(`FROM scratch
         MAINTAINER dockerio
-        ADD %s/baz /usr/lib/baz/quux`, server.URL), nil)
+        ADD %s/baz /usr/lib/baz/quux`, server.URL()), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2948,15 +3018,26 @@ func TestBuildADDRemoteFileMTime(t *testing.T) {
 		t.Fatal("The cache should have been used but wasn't - #1")
 	}
 
-	// Now set baz's times to anything else and redo the build
+	// Now create a different server withsame contents (causes different mtim)
 	// This time the cache should not be used
-	bazPath := path.Join(server.FakeContext.Dir, "baz")
-	err = syscall.UtimesNano(bazPath, make([]syscall.Timespec, 2))
-	if err != nil {
-		t.Fatalf("Error setting mtime on %q: %v", bazPath, err)
-	}
 
-	id3, err := buildImageFromContext(name3, ctx, true)
+	// allow some time for clock to pass as mtime precision is only 1s
+	time.Sleep(2 * time.Second)
+
+	server2, err := fakeStorage(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server2.Close()
+
+	ctx2, err := fakeContext(fmt.Sprintf(`FROM scratch
+        MAINTAINER dockerio
+        ADD %s/baz /usr/lib/baz/quux`, server2.URL()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctx2.Close()
+	id3, err := buildImageFromContext(name3, ctx2, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2965,7 +3046,7 @@ func TestBuildADDRemoteFileMTime(t *testing.T) {
 	}
 
 	// And for good measure do it again and make sure cache is used this time
-	id4, err := buildImageFromContext(name4, ctx, true)
+	id4, err := buildImageFromContext(name4, ctx2, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2985,10 +3066,11 @@ func TestBuildADDLocalAndRemoteFilesWithCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
+
 	ctx, err := fakeContext(fmt.Sprintf(`FROM scratch
         MAINTAINER dockerio
         ADD foo /usr/lib/bla/bar
-        ADD %s/baz /usr/lib/baz/quux`, server.URL),
+        ADD %s/baz /usr/lib/baz/quux`, server.URL()),
 		map[string]string{
 			"foo": "hello world",
 		})
@@ -3074,10 +3156,11 @@ func TestBuildADDLocalAndRemoteFilesWithoutCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
+
 	ctx, err := fakeContext(fmt.Sprintf(`FROM scratch
         MAINTAINER dockerio
         ADD foo /usr/lib/bla/bar
-        ADD %s/baz /usr/lib/baz/quux`, server.URL),
+        ADD %s/baz /usr/lib/baz/quux`, server.URL()),
 		map[string]string{
 			"foo": "hello world",
 		})
@@ -3924,7 +4007,7 @@ RUN cat /existing-directory-trailing-slash/test/foo | grep Hi`
 		if err := ioutil.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 			t.Fatalf("failed to open destination dockerfile: %v", err)
 		}
-		return &FakeContext{Dir: tmpDir}
+		return fakeContextFromDir(tmpDir)
 	}()
 	defer ctx.Close()
 
@@ -3975,7 +4058,7 @@ func TestBuildAddTarXz(t *testing.T) {
 		if err := ioutil.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 			t.Fatalf("failed to open destination dockerfile: %v", err)
 		}
-		return &FakeContext{Dir: tmpDir}
+		return fakeContextFromDir(tmpDir)
 	}()
 
 	defer ctx.Close()
@@ -4035,7 +4118,7 @@ func TestBuildAddTarXzGz(t *testing.T) {
 		if err := ioutil.WriteFile(filepath.Join(tmpDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 			t.Fatalf("failed to open destination dockerfile: %v", err)
 		}
-		return &FakeContext{Dir: tmpDir}
+		return fakeContextFromDir(tmpDir)
 	}()
 
 	defer ctx.Close()
@@ -4056,7 +4139,7 @@ func TestBuildFromGIT(t *testing.T) {
 					RUN [ -f /first ]
 					MAINTAINER docker`,
 		"first": "test git data",
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4260,16 +4343,16 @@ func TestBuildCmdJSONNoShDashC(t *testing.T) {
 	logDone("build - cmd should not have /bin/sh -c for json")
 }
 
-func TestBuildIgnoreInvalidInstruction(t *testing.T) {
+func TestBuildErrorInvalidInstruction(t *testing.T) {
 	name := "testbuildignoreinvalidinstruction"
 	defer deleteImages(name)
 
 	out, _, err := buildImageWithOut(name, "FROM busybox\nfoo bar", true)
-	if err != nil {
-		t.Fatal(err, out)
+	if err == nil {
+		t.Fatalf("Should have failed: %s", out)
 	}
 
-	logDone("build - ignore invalid Dockerfile instruction")
+	logDone("build - error invalid Dockerfile instruction")
 }
 
 func TestBuildEntrypointInheritance(t *testing.T) {
@@ -4458,6 +4541,28 @@ func TestBuildWithTabs(t *testing.T) {
 	logDone("build - with tabs")
 }
 
+func TestBuildLabels(t *testing.T) {
+	name := "testbuildlabel"
+	expected := `{"License":"GPL","Vendor":"Acme"}`
+	defer deleteImages(name)
+	_, err := buildImage(name,
+		`FROM busybox
+		LABEL Vendor=Acme
+                LABEL License GPL`,
+		true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := inspectFieldJSON(name, "Config.Labels")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != expected {
+		t.Fatalf("Labels %s, expected %s", res, expected)
+	}
+	logDone("build - label")
+}
+
 func TestBuildStderr(t *testing.T) {
 	// This test just makes sure that no non-error output goes
 	// to stderr
@@ -4547,7 +4652,7 @@ func TestBuildSymlinkBreakout(t *testing.T) {
 	})
 	w.Close()
 	f.Close()
-	if _, err := buildImageFromContext(name, &FakeContext{Dir: ctx}, false); err != nil {
+	if _, err := buildImageFromContext(name, fakeContextFromDir(ctx), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(tmpdir, "inject")); err == nil {
@@ -4800,7 +4905,7 @@ RUN echo from Dockerfile`,
 
 	// Make sure that -f is ignored and that we don't use the Dockerfile
 	// that's in the current dir
-	out, _, err := dockerCmdInDir(t, ctx.Dir, "build", "-f", "baz", "-t", "test1", server.URL+"/baz")
+	out, _, err := dockerCmdInDir(t, ctx.Dir, "build", "-f", "baz", "-t", "test1", server.URL()+"/baz")
 	if err != nil {
 		t.Fatalf("Failed to build: %s\n%s", out, err)
 	}
@@ -4959,8 +5064,8 @@ func TestBuildSpaces(t *testing.T) {
 	}
 
 	// Skip over the times
-	e1 := err1.Error()[strings.Index(err1.Error(), `level="`):]
-	e2 := err2.Error()[strings.Index(err1.Error(), `level="`):]
+	e1 := err1.Error()[strings.Index(err1.Error(), `level=`):]
+	e2 := err2.Error()[strings.Index(err1.Error(), `level=`):]
 
 	// Ignore whitespace since that's what were verifying doesn't change stuff
 	if strings.Replace(e1, " ", "", -1) != strings.Replace(e2, " ", "", -1) {
@@ -4973,8 +5078,8 @@ func TestBuildSpaces(t *testing.T) {
 	}
 
 	// Skip over the times
-	e1 = err1.Error()[strings.Index(err1.Error(), `level="`):]
-	e2 = err2.Error()[strings.Index(err1.Error(), `level="`):]
+	e1 = err1.Error()[strings.Index(err1.Error(), `level=`):]
+	e2 = err2.Error()[strings.Index(err1.Error(), `level=`):]
 
 	// Ignore whitespace since that's what were verifying doesn't change stuff
 	if strings.Replace(e1, " ", "", -1) != strings.Replace(e2, " ", "", -1) {
@@ -4987,8 +5092,8 @@ func TestBuildSpaces(t *testing.T) {
 	}
 
 	// Skip over the times
-	e1 = err1.Error()[strings.Index(err1.Error(), `level="`):]
-	e2 = err2.Error()[strings.Index(err1.Error(), `level="`):]
+	e1 = err1.Error()[strings.Index(err1.Error(), `level=`):]
+	e2 = err2.Error()[strings.Index(err1.Error(), `level=`):]
 
 	// Ignore whitespace since that's what were verifying doesn't change stuff
 	if strings.Replace(e1, " ", "", -1) != strings.Replace(e2, " ", "", -1) {
@@ -5143,4 +5248,31 @@ func TestBuildNotVerbose(t *testing.T) {
 	}
 
 	logDone("build - not verbose")
+}
+
+func TestBuildRUNoneJSON(t *testing.T) {
+	name := "testbuildrunonejson"
+
+	defer deleteAllContainers()
+	defer deleteImages(name)
+
+	ctx, err := fakeContext(`FROM hello-world:frozen
+RUN [ "/hello" ]`, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctx.Close()
+
+	buildCmd := exec.Command(dockerBinary, "build", "--no-cache", "-t", name, ".")
+	buildCmd.Dir = ctx.Dir
+	out, _, err := runCommandWithOutput(buildCmd)
+	if err != nil {
+		t.Fatalf("failed to build the image: %s, %v", out, err)
+	}
+
+	if !strings.Contains(out, "Hello from Docker") {
+		t.Fatalf("bad output: %s", out)
+	}
+
+	logDone("build - RUN with one JSON arg")
 }

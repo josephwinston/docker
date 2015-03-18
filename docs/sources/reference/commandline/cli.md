@@ -2,7 +2,7 @@ page_title: Command Line Interface
 page_description: Docker's CLI command description and usage
 page_keywords: Docker, Docker documentation, CLI, command line
 
-# Command Line
+# Docker Command Line
 
 {{ include "no-remote-sudo.md" }}
 
@@ -74,7 +74,6 @@ expect an integer, and they can only be specified once.
     A self-sufficient runtime for linux containers.
 
     Options:
-      --api-enable-cors=false                Enable CORS headers in the remote API
       --api-cors-header=""                   Set CORS headers in the remote API
       -b, --bridge=""                        Attach containers to a network bridge
       --bip=""                               Specify network bridge IP
@@ -98,6 +97,7 @@ expect an integer, and they can only be specified once.
       --ipv6=false                           Enable IPv6 networking
       -l, --log-level="info"                 Set the logging level
       --label=[]                             Set key=value labels to the daemon
+      --log-driver="json-file"               Container's logging driver (json-file/none)
       --mtu=0                                Set the containers network MTU
       -p, --pidfile="/var/run/docker.pid"    Path to use for daemon PID file
       --registry-mirror=[]                   Preferred Docker registry mirror
@@ -508,7 +508,7 @@ is returned by the `docker attach` command to its caller too:
 
     Build a new image from the source code at PATH
 
-      -f, --file=""            Name of the Dockerfile(Default is 'Dockerfile')
+      -f, --file=""            Name of the Dockerfile (Default is 'PATH/Dockerfile')
       --force-rm=false         Always remove intermediate containers
       --no-cache=false         Do not use cache when building the image
       --pull=false             Always attempt to pull a newer version of the image
@@ -537,6 +537,29 @@ Instead of specifying a context, you can pass a single Dockerfile in the
 If you use STDIN or specify a `URL`, the system places the contents into a
 file called `Dockerfile`, and any `-f`, `--file` option is ignored. In this 
 scenario, there is no context.
+
+### Return code
+
+On a successful build, a return code of success `0` will be returned.
+When the build fails, a non-zero failure code will be returned.
+
+There should be informational output of the reason for failure output
+to `STDERR`:
+
+```
+$ docker build -t fail .
+Sending build context to Docker daemon 2.048 kB
+Sending build context to Docker daemon
+Step 0 : FROM busybox
+ ---> 4986bf8c1536
+Step 1 : RUN exit 13
+ ---> Running in e26670ec7a0a
+INFO[0000] The command [/bin/sh -c exit 13] returned a non-zero code: 13
+$ echo $?
+1
+```
+
+### .dockerignore file
 
 If a file named `.dockerignore` exists in the root of `PATH` then it
 is interpreted as a newline-separated list of exclusion patterns.
@@ -727,8 +750,7 @@ If this behavior is undesired, set the 'p' option to false.
 
 The `--change` option will apply `Dockerfile` instructions to the image
 that is created.
-Supported `Dockerfile` instructions: `CMD`, `ENTRYPOINT`, `ENV`, `EXPOSE`,
-`ONBUILD`, `USER`, `VOLUME`, `WORKDIR`
+Supported `Dockerfile` instructions: `ADD`|`CMD`|`ENTRYPOINT`|`ENV`|`EXPOSE`|`FROM`|`MAINTAINER`|`RUN`|`USER`|`LABEL`|`VOLUME`|`WORKDIR`|`COPY`
 
 #### Commit a container
 
@@ -757,12 +779,15 @@ Supported `Dockerfile` instructions: `CMD`, `ENTRYPOINT`, `ENV`, `EXPOSE`,
 
 ## cp
 
-Copy files/folders from a container's filesystem to the host
-path.  Paths are relative to the root of the filesystem.
+Copy files/folders from a container's filesystem to the
+path.  Use '-' to write the data as a tar file to STDOUT.
+Paths are relative to the root of the filesystem.
 
-    Usage: docker cp CONTAINER:PATH HOSTPATH
+    Usage: docker cp CONTAINER:PATH HOSTPATH|-
 
-    Copy files/folders from the PATH to the HOSTPATH
+    Copy files/folders from the PATH to the HOSTPATH. Use '-' to write the data
+	as a tar file to STDOUT.
+
 
 ## create
 
@@ -778,7 +803,7 @@ Creates a new container.
       --cap-add=[]               Add Linux capabilities
       --cap-drop=[]              Drop Linux capabilities
       --cidfile=""               Write the container ID to the file
-      --cpuset=""                CPUs in which to allow execution (0-3, 0,1)
+      --cpuset-cpus=""           CPUs in which to allow execution (0-3, 0,1)
       --device=[]                Add a host device to the container
       --dns=[]                   Set custom DNS servers
       --dns-search=[]            Set custom DNS search domains
@@ -789,7 +814,10 @@ Creates a new container.
       -h, --hostname=""          Container host name
       -i, --interactive=false    Keep STDIN open even if not attached
       --ipc=""                   IPC namespace to use
+      -l, --label=[]             Set metadata on the container (e.g., --label=com.example.key=value)
+      --label-file=[]            Read in a line delimited file of labels
       --link=[]                  Add link to another container
+      --log-driver=""            Logging driver for container
       --lxc-conf=[]              Add custom lxc options
       -m, --memory=""            Memory limit
       --mac-address=""           Container MAC address (e.g. 92:d0:c6:0a:29:33)
@@ -799,8 +827,8 @@ Creates a new container.
       -p, --publish=[]           Publish a container's port(s) to the host
       --privileged=false         Give extended privileges to this container
       --read-only=false          Mount the container's root filesystem as read only
-      --restart=""               Restart policy to apply when a container exits
-      --security-opt=[]          Security Options
+      --restart="no"             Restart policy (no, on-failure[:max-retry], always)
+      --security-opt=[]          Security options
       -t, --tty=false            Allocate a pseudo-TTY
       -u, --user=""              Username or UID
       -v, --volume=[]            Bind mount a volume
@@ -817,7 +845,8 @@ container at any point.
 This is useful when you want to set up a container configuration ahead
 of time so that it is ready to start when you need it.
 
-Please see the [run command](#run) section for more details.
+Please see the [run command](#run) section and the [Docker run reference](
+/reference/run/) for more details.
 
 #### Examples
 
@@ -917,9 +946,11 @@ Using multiple filters will be handled as a *AND*; for example
 container 588a23dac085 *AND* the event type is *start*
 
 Current filters:
- * event
- * image
- * container
+
+* container
+* event
+* image
+* name
 
 #### Examples
 
@@ -988,6 +1019,12 @@ You'll need two shells for this example.
     $ sudo docker events --filter 'container=7805c1d35632' --filter 'event=stop'
     2014-09-03T15:49:29.999999999Z07:00 7805c1d35632: (from redis:2.8) stop
 
+    $ sudo docker events --filter 'container=container_1' --filter 'container=container_2'
+    2014-09-03T15:49:29.999999999Z07:00 4386fb97867d: (from ubuntu-1:14.04) die
+    2014-05-10T17:42:14.999999999Z07:00 4386fb97867d: (from ubuntu-1:14.04) stop
+    2014-05-10T17:42:14.999999999Z07:00 7805c1d35632: (from redis:2.8) die
+    2014-09-03T15:49:29.999999999Z07:00 7805c1d35632: (from redis:2.8) stop
+
 ## exec
 
     Usage: docker exec [OPTIONS] CONTAINER COMMAND [ARG...]
@@ -1000,8 +1037,8 @@ You'll need two shells for this example.
 
 The `docker exec` command runs a new command in a running container.
 
-The command started using `docker exec` will only run while the container's primary
-process (`PID 1`) is running, and will not be restarted if the container is restarted.
+The command started using `docker exec` only runs while the container's primary
+process (`PID 1`) is running, and it is not restarted if the container is restarted.
 
 If the container is paused, then the `docker exec` command will fail with an error:
 
@@ -1076,7 +1113,9 @@ To see how the `docker:latest` image was built:
     List images
 
       -a, --all=false      Show all images (default hides intermediate images)
+      --digests=false      Show digests
       -f, --filter=[]      Filter output based on conditions provided
+      --help=false         Print usage
       --no-trunc=false     Don't truncate output
       -q, --quiet=false    Only show numeric IDs
 
@@ -1125,6 +1164,22 @@ uses up the `VIRTUAL SIZE` listed only once.
     tryout                        latest              2629d1fa0b81b222fca63371ca16cbf6a0772d07759ff80e8d1369b926940074   23 hours ago        131.5 MB
     <none>                        <none>              5ed6274db6ceb2397844896966ea239290555e74ef307030ebb01ff91b1914df   24 hours ago        1.089 GB
 
+#### Listing image digests
+
+Images that use the v2 or later format have a content-addressable identifier
+called a `digest`. As long as the input used to generate the image is
+unchanged, the digest value is predictable. To list image digest values, use
+the `--digests` flag:
+
+    $ sudo docker images --digests | head
+    REPOSITORY                         TAG                 DIGEST                                                                    IMAGE ID            CREATED             VIRTUAL SIZE
+    localhost:5000/test/busybox        <none>              sha256:cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf   4986bf8c1536        9 weeks ago         2.43 MB
+
+When pushing or pulling to a 2.0 registry, the `push` or `pull` command
+output includes the image digest. You can `pull` using a digest value. You can
+also reference by digest in `create`, `run`, and `rmi` commands, as well as the
+`FROM` image reference in a Dockerfile.
+
 #### Filtering
 
 The filtering flag (`-f` or `--filter`) format is of "key=value". If there is more
@@ -1132,6 +1187,7 @@ than one filter, then pass multiple flags (e.g., `--filter "foo=bar" --filter "b
 
 Current filters:
  * dangling (boolean - true or false)
+ * label (`label=<key>` or `label=<key>=<value>`)
 
 ##### Untagged images
 
@@ -1238,6 +1294,7 @@ For example:
     Debug mode (client): true
     Fds: 10
     Goroutines: 9
+    System Time: Tue Mar 10 18:38:57 UTC 2015
     EventsListeners: 0
     Init Path: /usr/bin/docker
     Docker Root Dir: /var/lib/docker
@@ -1391,6 +1448,9 @@ For example:
       -t, --timestamps=false    Show timestamps
       --tail="all"              Number of lines to show from the end of the logs
 
+NOTE: this command is available only for containers with `json-file` logging
+driver.
+
 The `docker logs` command batch-retrieves logs present at the time of execution.
 
 The `docker logs --follow` command will continue streaming the new output from
@@ -1525,6 +1585,10 @@ use `docker pull`:
     $ sudo docker pull debian:testing
     # will pull the image named debian:testing and any intermediate
     # layers it is based on.
+    $ sudo docker pull debian@sha256:cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf
+    # will pull the image from the debian repository with the digest
+    # sha256:cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf
+    # and any intermediate layers it is based on.
     # (Typically the empty `scratch` image, a MAINTAINER layer,
     # and the un-tarred base).
     $ sudo docker pull --all-tags centos
@@ -1596,9 +1660,9 @@ deleted.
 
 #### Removing tagged images
 
-Images can be removed either by their short or long IDs, or their image
-names. If an image has more than one name, each of them needs to be
-removed before the image is removed.
+You can remove an image using its short or long ID, its tag, or its digest. If
+an image has one or more tag or digest reference, you must remove all of them
+before the image is removed.
 
     $ sudo docker images
     REPOSITORY                TAG                 IMAGE ID            CREATED             SIZE
@@ -1607,20 +1671,34 @@ removed before the image is removed.
     test2                     latest              fd484f19954f        23 seconds ago      7 B (virtual 4.964 MB)
 
     $ sudo docker rmi fd484f19954f
-    Error: Conflict, cannot delete image fd484f19954f because it is tagged in multiple repositories
+    Error: Conflict, cannot delete image fd484f19954f because it is tagged in multiple repositories, use -f to force
     2013/12/11 05:47:16 Error: failed to remove one or more images
 
     $ sudo docker rmi test1
-    Untagged: fd484f19954f4920da7ff372b5067f5b7ddb2fd3830cecd17b96ea9e286ba5b8
+    Untagged: test1:latest
     $ sudo docker rmi test2
-    Untagged: fd484f19954f4920da7ff372b5067f5b7ddb2fd3830cecd17b96ea9e286ba5b8
+    Untagged: test2:latest
 
     $ sudo docker images
     REPOSITORY                TAG                 IMAGE ID            CREATED             SIZE
     test                      latest              fd484f19954f        23 seconds ago      7 B (virtual 4.964 MB)
     $ sudo docker rmi test
-    Untagged: fd484f19954f4920da7ff372b5067f5b7ddb2fd3830cecd17b96ea9e286ba5b8
+    Untagged: test:latest
     Deleted: fd484f19954f4920da7ff372b5067f5b7ddb2fd3830cecd17b96ea9e286ba5b8
+
+An image pulled by digest has no tag associated with it:
+
+    $ sudo docker images --digests
+    REPOSITORY                     TAG       DIGEST                                                                    IMAGE ID        CREATED         VIRTUAL SIZE
+    localhost:5000/test/busybox    <none>    sha256:cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf   4986bf8c1536    9 weeks ago     2.43 MB
+
+To remove an image using its digest:
+
+    $ sudo docker rmi localhost:5000/test/busybox@sha256:cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf
+    Untagged: localhost:5000/test/busybox@sha256:cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf
+    Deleted: 4986bf8c15363d1c5d15512d5266f8777bfba4974ac56e3270e7760f6f0a8125
+    Deleted: ea13149945cb6b1e746bf28032f02e9b5a793523481a0a18645fc77ad53c4ea2
+    Deleted: df7546f9f060a2268024c8a230d8639878585defcc1bc6f79d2728a13957871b
 
 ## run
 
@@ -1634,7 +1712,7 @@ removed before the image is removed.
       --cap-add=[]               Add Linux capabilities
       --cap-drop=[]              Drop Linux capabilities
       --cidfile=""               Write the container ID to the file
-      --cpuset=""                CPUs in which to allow execution (0-3, 0,1)
+      --cpuset-cpus=""           CPUs in which to allow execution (0-3, 0,1)
       -d, --detach=false         Run container in background and print container ID
       --device=[]                Add a host device to the container
       --dns=[]                   Set custom DNS servers
@@ -1648,8 +1726,11 @@ removed before the image is removed.
       -i, --interactive=false    Keep STDIN open even if not attached
       --ipc=""                   IPC namespace to use
       --link=[]                  Add link to another container
+      --log-driver=""            Logging driver for container
       --lxc-conf=[]              Add custom lxc options
       -m, --memory=""            Memory limit
+      -l, --label=[]             Set metadata on the container (e.g., --label=com.example.key=value)
+      --label-file=[]            Read in a file of labels (EOL delimited)
       --mac-address=""           Container MAC address (e.g. 92:d0:c6:0a:29:33)
       --memory-swap=""           Total memory (memory + swap), '-1' to disable swap
       --name=""                  Assign a name to the container
@@ -1659,7 +1740,7 @@ removed before the image is removed.
       --pid=""                   PID namespace to use
       --privileged=false         Give extended privileges to this container
       --read-only=false          Mount the container's root filesystem as read only
-      --restart=""               Restart policy to apply when a container exits
+      --restart="no"             Restart policy (no, on-failure[:max-retry], always)
       --rm=false                 Automatically remove the container when it exits
       --security-opt=[]          Security Options
       --sig-proxy=true           Proxy received signals to the process
@@ -1820,8 +1901,39 @@ An example of a file passed with `--env-file`
 
     $ sudo docker run --name console -t -i ubuntu bash
 
-This will create and run a new container with the container name being
-`console`.
+A label is a a `key=value` pair that applies metadata to a container. To label a container with two labels:
+
+    $ sudo docker run -l my-label --label com.example.foo=bar ubuntu bash
+
+The `my-label` key doesn't specify a value so the label defaults to an empty
+string(`""`). To add multiple labels, repeat the label flag (`-l` or `--label`).
+
+The `key=value` must be unique to avoid overwriting the label value. If you
+specify labels with identical keys but different values, each subsequent value
+overwrites the previous. Docker uses the last `key=value` you supply.
+
+Use the `--label-file` flag to load multiple labels from a file. Delimit each
+label in the file with an EOL mark. The example below loads labels from a
+labels file in the current directory:
+
+    $ sudo docker run --label-file ./labels ubuntu bash
+
+The label-file format is similar to the format for loading environment
+variables. (Unlike environment variables, labels are not visislbe to processes
+running inside a container.) The following example illustrates a label-file
+format:
+
+    com.example.label1="a label"
+
+    # this is a comment
+    com.example.label2=another\ label
+    com.example.label3
+
+You can load multiple label-files by supplying multiple  `--label-file` flags. 
+
+For additional information on working with labels, see [*Labels - custom
+metadata in Docker*](/userguide/labels-custom-metadata/) in the Docker User
+Guide.
 
     $ sudo docker run --link /redis:redis --name console ubuntu bash
 
@@ -2081,7 +2193,7 @@ more details on finding shared images from the command line.
 
     Usage: docker start [OPTIONS] CONTAINER [CONTAINER...]
 
-    Restart a stopped container
+    Start one or more stopped containers
 
       -a, --attach=false         Attach STDOUT/STDERR and forward signals
       -i, --interactive=false    Attach container's STDIN

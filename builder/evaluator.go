@@ -49,6 +49,7 @@ var (
 // Environment variable interpolation will happen on these statements only.
 var replaceEnvAllowed = map[string]struct{}{
 	command.Env:     {},
+	command.Label:   {},
 	command.Add:     {},
 	command.Copy:    {},
 	command.Workdir: {},
@@ -62,6 +63,7 @@ var evaluateTable map[string]func(*Builder, []string, map[string]bool, string) e
 func init() {
 	evaluateTable = map[string]func(*Builder, []string, map[string]bool, string) error{
 		command.Env:        env,
+		command.Label:      label,
 		command.Maintainer: maintainer,
 		command.Add:        add,
 		command.Copy:       dispatchCopy, // copy() is a go builtin
@@ -309,7 +311,5 @@ func (b *Builder) dispatch(stepN int, ast *parser.Node) error {
 		return f(b, strList, attrs, original)
 	}
 
-	fmt.Fprintf(b.ErrStream, "# Skipping unknown instruction %s\n", strings.ToUpper(cmd))
-
-	return nil
+	return fmt.Errorf("Unknown instruction: %s", strings.ToUpper(cmd))
 }

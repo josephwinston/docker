@@ -22,7 +22,10 @@ shift || usage 1 >&2
 [ $# -gt 0 -a "$dir" ] || usage 2 >&2
 mkdir -p "$dir"
 
-declare -A repositories=()
+# hacky workarounds for Bash 3 support (no associative arrays)
+images=()
+rm -f "$dir"/tags-*.tmp
+# repositories[busybox]='"latest": "...", "ubuntu-14.04": "..."'
 
 while [ $# -gt 0 ]; do
 	imageTag="$1"
@@ -52,15 +55,19 @@ while [ $# -gt 0 ]; do
 	ancestry=( ${ancestryJson//[\[\] \"]/} )
 	unset IFS
 	
-	[ -z "${repositories[$image]}" ] || repositories[$image]+=', '
-	repositories[$image]+='"'"$tag"'": "'"$imageId"'"'
+	if [ -s "$dir/tags-$image.tmp" ]; then
+		echo -n ', ' >> "$dir/tags-$image.tmp"
+	else
+		images=( "${images[@]}" "$image" )
+	fi
+	echo -n '"'"$tag"'": "'"$imageId"'"' >> "$dir/tags-$image.tmp"
 	
 	echo "Downloading '$imageTag' (${#ancestry[@]} layers)..."
 	for imageId in "${ancestry[@]}"; do
 		mkdir -p "$dir/$imageId"
 		echo '1.0' > "$dir/$imageId/VERSION"
 		
-		curl -sSL -H "Authorization: Token $token" "https://registry-1.docker.io/v1/images/$imageId/json" -o "$dir/$imageId/json" -C -
+		curl -sSL -H "Authorization: Token $token" "https://registry-1.docker.io/v1/images/$imageId/json" -o "$dir/$imageId/json"
 		
 		# TODO figure out why "-C -" doesn't work here
 		# "curl: (33) HTTP server doesn't seem to support byte ranges. Cannot resume."
@@ -77,13 +84,15 @@ done
 
 echo -n '{' > "$dir/repositories"
 firstImage=1
-for image in "${!repositories[@]}"; do
+for image in "${images[@]}"; do
 	[ "$firstImage" ] || echo -n ',' >> "$dir/repositories"
 	firstImage=
 	echo -n $'\n\t' >> "$dir/repositories"
-	echo -n '"'"$image"'": { '"${repositories[$image]}"' }' >> "$dir/repositories"
+	echo -n '"'"$image"'": { '"$(cat "$dir/tags-$image.tmp")"' }' >> "$dir/repositories"
 done
 echo -n $'\n}\n' >> "$dir/repositories"
+
+rm -f "$dir"/tags-*.tmp
 
 echo "Download of images into '$dir' complete."
 echo "Use something like the following to load the result into a Docker daemon:"

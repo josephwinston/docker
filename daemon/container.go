@@ -14,11 +14,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/libcontainer"
+	"github.com/docker/libcontainer/configs"
 	"github.com/docker/libcontainer/devices"
 	"github.com/docker/libcontainer/label"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/execdriver"
+	"github.com/docker/docker/daemon/logger"
+	"github.com/docker/docker/daemon/logger/jsonfilelog"
 	"github.com/docker/docker/engine"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/links"
@@ -96,9 +100,11 @@ type Container struct {
 	VolumesRW  map[string]bool
 	hostConfig *runconfig.HostConfig
 
-	activeLinks        map[string]*links.Link
-	monitor            *containerMonitor
-	execCommands       *execStore
+	activeLinks  map[string]*links.Link
+	monitor      *containerMonitor
+	execCommands *execStore
+	// logDriver for closing
+	logDriver          logger.Logger
 	AppliedVolumesFrom map[string]struct{}
 }
 
@@ -259,18 +265,18 @@ func populateCommand(c *Container, env []string) error {
 	pid.HostPid = c.hostConfig.PidMode.IsHost()
 
 	// Build lists of devices allowed and created within the container.
-	userSpecifiedDevices := make([]*devices.Device, len(c.hostConfig.Devices))
+	userSpecifiedDevices := make([]*configs.Device, len(c.hostConfig.Devices))
 	for i, deviceMapping := range c.hostConfig.Devices {
-		device, err := devices.GetDevice(deviceMapping.PathOnHost, deviceMapping.CgroupPermissions)
+		device, err := devices.DeviceFromPath(deviceMapping.PathOnHost, deviceMapping.CgroupPermissions)
 		if err != nil {
 			return fmt.Errorf("error gathering device information while adding custom device %q: %s", deviceMapping.PathOnHost, err)
 		}
 		device.Path = deviceMapping.PathInContainer
 		userSpecifiedDevices[i] = device
 	}
-	allowedDevices := append(devices.DefaultAllowedDevices, userSpecifiedDevices...)
+	allowedDevices := append(configs.DefaultAllowedDevices, userSpecifiedDevices...)
 
-	autoCreatedDevices := append(devices.DefaultAutoCreatedDevices, userSpecifiedDevices...)
+	autoCreatedDevices := append(configs.DefaultAutoCreatedDevices, userSpecifiedDevices...)
 
 	// TODO: this can be removed after lxc-conf is fully deprecated
 	lxcConfig, err := mergeLxcConfIntoOptions(c.hostConfig)
@@ -301,10 +307,10 @@ func populateCommand(c *Container, env []string) error {
 	}
 
 	resources := &execdriver.Resources{
-		Memory:     c.Config.Memory,
-		MemorySwap: c.Config.MemorySwap,
-		CpuShares:  c.Config.CpuShares,
-		Cpuset:     c.Config.Cpuset,
+		Memory:     c.hostConfig.Memory,
+		MemorySwap: c.hostConfig.MemorySwap,
+		CpuShares:  c.hostConfig.CpuShares,
+		CpusetCpus: c.hostConfig.CpusetCpus,
 		Rlimits:    rlimits,
 	}
 
@@ -895,7 +901,7 @@ func (container *Container) GetSize() (int64, int64) {
 	)
 
 	if err := container.Mount(); err != nil {
-		log.Errorf("Warning: failed to compute size of container rootfs %s: %s", container.ID, err)
+		log.Errorf("Failed to compute size of container rootfs %s: %s", container.ID, err)
 		return sizeRw, sizeRootfs
 	}
 	defer container.Unmount()
@@ -903,7 +909,7 @@ func (container *Container) GetSize() (int64, int64) {
 	initID := fmt.Sprintf("%s-init", container.ID)
 	sizeRw, err = driver.DiffSize(container.ID, initID)
 	if err != nil {
-		log.Errorf("Warning: driver %s couldn't return diff size of container %s: %s", driver, container.ID, err)
+		log.Errorf("Driver %s couldn't return diff size of container %s: %s", driver, container.ID, err)
 		// FIXME: GetSize should return an error. Not changing it now in case
 		// there is a side-effect.
 		sizeRw = -1
@@ -972,7 +978,7 @@ func (container *Container) Exposes(p nat.Port) bool {
 	return exists
 }
 
-func (container *Container) GetPtyMaster() (*os.File, error) {
+func (container *Container) GetPtyMaster() (libcontainer.Console, error) {
 	ttyConsole, ok := container.command.ProcessConfig.Terminal.(execdriver.TtyTerminal)
 	if !ok {
 		return nil, ErrNoTTY
@@ -1234,15 +1240,15 @@ func (container *Container) initializeNetworking() error {
 // Make sure the config is compatible with the current kernel
 func (container *Container) verifyDaemonSettings() {
 	if container.Config.Memory > 0 && !container.daemon.sysInfo.MemoryLimit {
-		log.Infof("WARNING: Your kernel does not support memory limit capabilities. Limitation discarded.")
+		log.Warnf("Your kernel does not support memory limit capabilities. Limitation discarded.")
 		container.Config.Memory = 0
 	}
 	if container.Config.Memory > 0 && !container.daemon.sysInfo.SwapLimit {
-		log.Infof("WARNING: Your kernel does not support swap limit capabilities. Limitation discarded.")
+		log.Warnf("Your kernel does not support swap limit capabilities. Limitation discarded.")
 		container.Config.MemorySwap = -1
 	}
 	if container.daemon.sysInfo.IPv4ForwardingDisabled {
-		log.Infof("WARNING: IPv4 forwarding is disabled. Networking will not work")
+		log.Warnf("IPv4 forwarding is disabled. Networking will not work")
 	}
 }
 
@@ -1353,21 +1359,36 @@ func (container *Container) setupWorkingDirectory() error {
 	return nil
 }
 
-func (container *Container) startLoggingToDisk() error {
-	// Setup logging of stdout and stderr to disk
-	logPath, err := container.logPath("json")
-	if err != nil {
-		return err
+func (container *Container) startLogging() error {
+	cfg := container.hostConfig.LogConfig
+	if cfg.Type == "" {
+		cfg = container.daemon.defaultLogConfig
 	}
-	container.LogPath = logPath
+	var l logger.Logger
+	switch cfg.Type {
+	case "json-file":
+		pth, err := container.logPath("json")
+		if err != nil {
+			return err
+		}
 
-	if err := container.daemon.LogToDisk(container.stdout, container.LogPath, "stdout"); err != nil {
-		return err
+		dl, err := jsonfilelog.New(pth)
+		if err != nil {
+			return err
+		}
+		l = dl
+	case "none":
+		return nil
+	default:
+		return fmt.Errorf("Unknown logging driver: %s", cfg.Type)
 	}
 
-	if err := container.daemon.LogToDisk(container.stderr, container.LogPath, "stderr"); err != nil {
+	if copier, err := logger.NewCopier(container.ID, map[string]io.Reader{"stdout": container.StdoutPipe(), "stderr": container.StderrPipe()}, l); err != nil {
 		return err
+	} else {
+		copier.Run()
 	}
+	container.logDriver = l
 
 	return nil
 }
@@ -1467,4 +1488,13 @@ func (container *Container) getNetworkedContainer() (*Container, error) {
 
 func (container *Container) Stats() (*execdriver.ResourceStats, error) {
 	return container.daemon.Stats(container)
+}
+
+func (c *Container) LogDriverType() string {
+	c.Lock()
+	defer c.Unlock()
+	if c.hostConfig.LogConfig.Type == "" {
+		return c.daemon.defaultLogConfig.Type
+	}
+	return c.hostConfig.LogConfig.Type
 }
